@@ -1,0 +1,17 @@
+[
+{
+  "directory": "/home/jzj/SZ3-3.2.0/tools/sz3",
+  "command": "/usr/bin/c++ -DSZ3_DEBUG_TIMINGS=0 -I/home/jzj/SZ3-3.2.0/include -O3 -DNDEBUG -fopenmp -o CMakeFiles/sz3.dir/sz3.cpp.o -c /home/jzj/SZ3-3.2.0/tools/sz3/sz3.cpp",
+  "file": "/home/jzj/SZ3-3.2.0/tools/sz3/sz3.cpp"
+},
+{
+  "directory": "/home/jzj/SZ3-3.2.0/tools/sz3",
+  "command": "/usr/bin/c++ -DSZ3_DEBUG_TIMINGS=0 -I/home/jzj/SZ3-3.2.0/include -O3 -DNDEBUG -fopenmp -o CMakeFiles/sz3_smoke_test.dir/sz3_smoke_test.cpp.o -c /home/jzj/SZ3-3.2.0/tools/sz3/sz3_smoke_test.cpp",
+  "file": "/home/jzj/SZ3-3.2.0/tools/sz3/sz3_smoke_test.cpp"
+},
+{
+  "directory": "/home/jzj/SZ3-3.2.0/tools/sz3c",
+  "command": "/usr/bin/c++ -DSZ3_DEBUG_TIMINGS=0 -DSZ3c_EXPORTS -I/home/jzj/SZ3-3.2.0/tools/sz3c/include -I/home/jzj/SZ3-3.2.0/include -O3 -DNDEBUG -fPIC -fopenmp -o CMakeFiles/SZ3c.dir/src/sz3c.cpp.o -c /home/jzj/SZ3-3.2.0/tools/sz3c/src/sz3c.cpp",
+  "file": "/home/jzj/SZ3-3.2.0/tools/sz3c/src/sz3c.cpp"
+}
+]

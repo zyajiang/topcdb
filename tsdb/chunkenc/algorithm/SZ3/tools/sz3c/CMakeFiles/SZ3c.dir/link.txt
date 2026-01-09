@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libSZ3c.so -o libSZ3c.so CMakeFiles/SZ3c.dir/src/sz3c.cpp.o  -Wl,-rpath,/usr/local/lib: /usr/lib/gcc/x86_64-linux-gnu/11/libgomp.a /usr/lib/x86_64-linux-gnu/libpthread.a /usr/lib/x86_64-linux-gnu/libzstd.a 

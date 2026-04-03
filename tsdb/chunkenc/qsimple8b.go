@@ -269,7 +269,7 @@ func (a *CLAppender) estimateHuffmanSize() int {
 		lastKey = key
 		lastFreq = freqMap[key]
 	}
-	metaCost := (max1 + max2 + 1) * len(keys) / 32
+	metaCost := (max1 + max2 + 1) * len(keys) / 8
 
 	return int(math.Ceil(entropy/8.0)) + metaCost
 }
@@ -323,7 +323,9 @@ func (a *CLAppender) Compact() error {
 		// When the number of values that can be encoded in 8 bits is less than 80%
 		// or the number of values that need more than 12 bits is more than 5%,
 		// switch to Auto to choose a better compression method.
-		if p8bits > 0.8 && p12bits > 0.95 {
+		if p8bits > 0.99 {
+			a.ctype = Huffman
+		} else if p8bits > 0.8 && p12bits > 0.95 {
 			a.ctype = QSimple8b
 
 			compressed_data, err = EncodeAll(a.IntDelta_buffer)

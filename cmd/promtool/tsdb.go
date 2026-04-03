@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"log/slog"
 	"math"
@@ -69,7 +70,9 @@ type compressBenchmark struct {
 	outPath string
 
 	samples [][]tvpair
-	scrape  []*lb
+	prec    []float64
+
+	scrape []*lb
 
 	cleanup bool
 	storage *tsdb.DB
@@ -218,6 +221,46 @@ func (b *compressBenchmark) ReadDataset(dataset, path string) error {
 	num_labels := 1
 
 	switch dataset {
+	case "electricity":
+		if err := b.readElectricityFile(filepath.Join(path, "LD2011_2014.txt")); err != nil {
+			return err
+		}
+
+		num_labels = len(b.samples)
+	case "geolife":
+		err := filepath.WalkDir(path, func(subpath string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() && strings.HasSuffix(d.Name(), ".plt") {
+				if err := b.readGeolifeFile(subpath); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		num_labels = 5
+	case "wisdm":
+		err := filepath.WalkDir(path, func(subpath string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() && strings.HasSuffix(d.Name(), ".txt") {
+				if err := b.readWISDMFile(subpath); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		num_labels = 3
 	case "pamapv2":
 		// list all files in the directory
 		listFiles := func(dir string) ([]string, error) {
@@ -316,6 +359,7 @@ func (b *compressBenchmark) ReadDataset(dataset, path string) error {
 				labels.Label{Name: "CaseID", Value: strconv.Itoa(i)},
 			),
 		})
+		// b.prec[i] = math.Pow(10, -b.prec[i])
 	}
 
 	return nil
@@ -408,6 +452,113 @@ func (b *compressBenchmark) selectFile(matchers ...*labels.Matcher) error {
 	return nil
 }
 
+func (b *compressBenchmark) readElectricityFile(filename string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lbs := len(b.samples)
+	for j := 0; j < 370; j++ {
+		b.samples = append(b.samples, make([]tvpair, 0, 8))
+	}
+
+	row := 0
+	data_error := 0
+
+	scanner.Scan()
+	for scanner.Scan() {
+		row++
+		line := strings.Split(scanner.Text(), ";")
+		for k := 1; k <= 370; k++ {
+			vstring := strings.Replace(line[k], ",", ".", 1)
+			val, err := strconv.ParseFloat(vstring, 64)
+			if err != nil {
+				data_error++
+				continue
+			}
+			b.samples[lbs+k-1] = append(b.samples[lbs+k-1], tvpair{int64(row * timeDelta), val})
+		}
+	}
+	fmt.Printf("ReadElectricityFile:: data convertion failed: %d\n", data_error)
+	return nil
+}
+
+func (b *compressBenchmark) readGeolifeFile(filename string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lbs := len(b.samples)
+	for j := 0; j < 5; j++ {
+		b.samples = append(b.samples, make([]tvpair, 0, 8))
+	}
+
+	row := 0
+	data_error := 0
+
+	// skip header
+	for j := 0; j < 6; j++ {
+		scanner.Scan()
+	}
+
+	for scanner.Scan() {
+		row++
+		line := strings.Split(scanner.Text(), ",")
+		k := 4 // only read altitude
+		// for k := 0; k < 5; k++ {
+		val, err := strconv.ParseFloat(line[k], 64)
+		if err != nil {
+			data_error++
+			continue
+		}
+		b.samples[lbs+k] = append(b.samples[lbs+k], tvpair{int64(row * timeDelta), val})
+		// }
+	}
+
+	fmt.Printf("ReadGeolifeFile:: data convertion failed: %d\n", data_error)
+	return nil
+}
+
+func (b *compressBenchmark) readWISDMFile(filename string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lbs := len(b.samples)
+	for j := 0; j < 3; j++ {
+		b.samples = append(b.samples, make([]tvpair, 0, 8))
+	}
+
+	row := 0
+	data_error := 0
+
+	for scanner.Scan() {
+		row++
+		text := scanner.Text()
+		line := strings.Split(text[:len(text)-1], ",")
+		for k := 3; k <= 5; k++ {
+			val, err := strconv.ParseFloat(line[k], 64)
+			if err != nil {
+				data_error++
+				continue
+			}
+			b.samples[lbs+k-3] = append(b.samples[lbs+k-3], tvpair{int64(row * timeDelta), val})
+		}
+	}
+
+	fmt.Printf("ReadWISDMFile:: data convertion failed: %d\n", data_error)
+	return nil
+}
+
 func (b *compressBenchmark) readHouseholdVoltageFile(filename string) error {
 	f, err := os.Open(filename)
 	if err != nil {
@@ -419,24 +570,30 @@ func (b *compressBenchmark) readHouseholdVoltageFile(filename string) error {
 	lbs := len(b.samples)
 	for j := 0; j < 7; j++ {
 		b.samples = append(b.samples, make([]tvpair, 0, 8))
+		b.prec = append(b.prec, 0.0)
 	}
+
 	row := 0
 	val := float64(0)
-	scanner.Scan()
-
 	data_error := 0
 
+	scanner.Scan()
 	for scanner.Scan() {
 		row++
 		line := strings.Split(scanner.Text(), ";")
-		for k := 2; k <= 8; k++ {
-			val, err = strconv.ParseFloat(line[k], 64)
-			if err != nil {
-				data_error++
-				continue
-			}
-			b.samples[lbs+k-2] = append(b.samples[lbs+k-2], tvpair{int64(row * timeDelta), val})
+		k := 4 // Only read voltage measurement
+		// for k := 2; k <= 8; k++ {
+		val, err = strconv.ParseFloat(line[k], 64)
+		if err != nil {
+			data_error++
+			continue
 		}
+		prec := getDecimalPrecision(line[k])
+		if prec != -1 {
+			b.prec[lbs+k-2] = math.Max(b.prec[lbs+k-2], float64(prec))
+		}
+		b.samples[lbs+k-2] = append(b.samples[lbs+k-2], tvpair{int64(row * timeDelta), val})
+		// }
 	}
 
 	fmt.Printf("ReadPowerConsumptionFile:: data convertion failed: %d\n", data_error)
@@ -453,13 +610,14 @@ func (b *compressBenchmark) readETTFile(filename string) error {
 	lbs := len(b.samples)
 	for j := 0; j < 7; j++ {
 		b.samples = append(b.samples, make([]tvpair, 0, 8))
+		b.prec = append(b.prec, 0.0)
 	}
+
 	row := 0
 	val := float64(0)
-	scanner.Scan()
-
 	data_error := 0
 
+	scanner.Scan()
 	for scanner.Scan() {
 		row++
 		line := strings.Split(scanner.Text(), ",")
@@ -468,6 +626,10 @@ func (b *compressBenchmark) readETTFile(filename string) error {
 			if err != nil {
 				data_error++
 				continue
+			}
+			prec := getDecimalPrecision(line[k])
+			if prec != -1 {
+				b.prec[lbs+k-1] = math.Max(b.prec[lbs+k-1], float64(prec))
 			}
 			b.samples[lbs+k-1] = append(b.samples[lbs+k-1], tvpair{int64(row * timeDelta), val})
 		}
@@ -487,12 +649,13 @@ func (b *compressBenchmark) readUCI_GASFile(filename string) error {
 	lbs := len(b.samples)
 	for j := 0; j < 16; j++ {
 		b.samples = append(b.samples, make([]tvpair, 0, 8))
+		b.prec = append(b.prec, 0.0)
 	}
 
 	row := 0
-	scanner.Scan()
 	data_error := 0
 
+	scanner.Scan()
 	for scanner.Scan() {
 		row++
 		line := strings.Fields(scanner.Text())
@@ -501,6 +664,10 @@ func (b *compressBenchmark) readUCI_GASFile(filename string) error {
 			if err != nil {
 				data_error++
 				continue
+			}
+			prec := getDecimalPrecision(line[j])
+			if prec != -1 {
+				b.prec[lbs+j-3] = math.Max(b.prec[lbs+j-3], float64(prec))
 			}
 			b.samples[lbs+j-3] = append(b.samples[lbs+j-3], tvpair{int64(row * timeDelta), val})
 		}
@@ -523,12 +690,17 @@ func (b *compressBenchmark) readUCRFile(filename string) error {
 	for scanner.Scan() {
 		line := strings.Split(scanner.Text(), "\t")
 		b.samples = append(b.samples, make([]tvpair, 0, 8))
+		b.prec = append(b.prec, 0.0)
 
 		for j := 0; j < len(line); j++ {
 			val, err := strconv.ParseFloat(line[j], 64)
 			if err != nil {
 				data_error++
 				continue
+			}
+			prec := getDecimalPrecision(line[j])
+			if prec != -1 {
+				b.prec[row] = math.Max(b.prec[row], float64(prec))
 			}
 			b.samples[row] = append(b.samples[row], tvpair{int64(j * timeDelta), val})
 		}
@@ -548,6 +720,7 @@ func (b *compressBenchmark) readPAMAP2File(filename string) error {
 	scanner := bufio.NewScanner(f)
 	for j := 0; j < 39; j++ {
 		b.samples = append(b.samples, make([]tvpair, 0, 8))
+		b.prec = append(b.prec, 0.0)
 	}
 
 	row, data_error := 0, 0
@@ -562,6 +735,10 @@ func (b *compressBenchmark) readPAMAP2File(filename string) error {
 					data_error++
 					continue
 				}
+				prec := getDecimalPrecision(line[j])
+				if prec != -1 {
+					b.prec[itr] = math.Max(b.prec[itr], float64(prec))
+				}
 				b.samples[itr] = append(b.samples[itr], tvpair{int64(row * timeDelta), val})
 				itr++
 			}
@@ -570,6 +747,42 @@ func (b *compressBenchmark) readPAMAP2File(filename string) error {
 
 	fmt.Printf("ReadPAMAP2File:: data convertion error: %d\n", data_error)
 	return nil
+}
+
+func getDecimalPrecision(f string) int {
+	off := 0
+	if len(f) > 0 && (f[0] == '+' || f[0] == '-') {
+		off = 1
+		if off >= len(f) {
+			return -1
+		}
+	}
+
+	dotIdx := strings.IndexByte(f[off:], '.')
+	if dotIdx == -1 {
+		return 0
+	}
+	dotIdx += off
+
+	if dotIdx+1 >= len(f) {
+		return 0
+	}
+
+	afterDot := f[dotIdx+1:]
+	expIdx := strings.IndexAny(afterDot, "eE")
+
+	precEnd := len(afterDot)
+	if expIdx != -1 {
+		precEnd = expIdx
+	}
+
+	for i := 0; i < precEnd; i++ {
+		if afterDot[i] < '0' || afterDot[i] > '9' {
+			return -1
+		}
+	}
+
+	return precEnd
 }
 
 func (b *compressBenchmark) startProfiling() error {

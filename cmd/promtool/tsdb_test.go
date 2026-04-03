@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,19 +44,34 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 	}
 
 	// ErrorBound is absolute error bound for compression algorithms.
-	ErrorBound := 0.0001
+	ErrorBound := 1e-4
 	// The Whole dataset will be divided into chunks of ChunkSize for compression.
 	ChunkSize := 1000
 	Datasets := map[string]string{
-		"pamapv2":           "/home/jzj/Datasets/PAMAP2_Dataset",
-		"uci_gas":           "/home/jzj/Datasets/UCI_GAS",
-		"ucr":               "/home/jzj/Datasets/UCRAchive_2018",
-		"ett":               "/home/jzj/Datasets/ETT",
-		"household_voltage": "/home/jzj/Datasets/Household_Voltage",
+		// "pamapv2": "/home/jzj/Datasets/PAMAP2_Dataset",
+		// "pamapv2": "/home/jzj/Datasets/PAMAP2_Dataset_mini",
+		// "uci_gas":           "/home/jzj/Datasets/UCI_GAS",
+		// "ucr":               "/home/jzj/Datasets/UCRAchive_2018",
+		"ett": "/home/jzj/Datasets/ETT",
+		// "household_voltage": "/home/jzj/Datasets/Household_Voltage",
+		// "wisdm":       "/home/jzj/Datasets/WISDM_Dataset/raw",
+		// "geolife":     "/home/jzj/Datasets/Geolife_Trajectories_1_3/Data/",
+		// "electricity": "/home/jzj/Datasets/Electricity",
 	}
+	// LosslessErrbound := map[string]float64{
+	// 	"pamapv2":           1e-9,
+	// 	"uci_gas":           1e-2,
+	// 	"ucr":               1e-11,
+	// 	"ett":               1e-18,
+	// 	"household_voltage": 1e-3,
+	// 	"wisdm":             1e-6,
+	// 	"geolife":           1e-10,
+	// 	"electricity":       1e-6,
+	// }
 
 	for name, path := range Datasets {
 		fmt.Printf("Dataset: %s\n", name)
+		// ErrorBound = LosslessErrbound[name]
 
 		tb.samples = make([][]tvpair, 0, 8)
 		if err := tb.ReadDataset(name, path); err != nil {
@@ -65,7 +81,7 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 		var uncompressed_total_bytes int
 		var timestamp_total_bytes int
 		var sz_total_bytes, most_total_bytes, machete_total_bytes, gorilla_total_bytes int
-		var cl_total_bytes, simplebits_total_bytes int
+		var simple8b_total_bytes, simplebits_total_bytes, bitpacking_total_bytes, varint_total_bytes, pfor_total_bytes, huffman_total_bytes, auto_total_bytes int
 
 		for _, vals := range tb.samples {
 			currChunkSize := min(ChunkSize, len(vals))
@@ -77,38 +93,106 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 				gorilla_chk := chunkenc.NewXORChunk()
 				gorilla_app, _ := gorilla_chk.Appender()
 
-				// Compactable Lossy
-				cl_chk := chunkenc.NewCLChunk()
-				cl_app, _ := cl_chk.Appender()
-				cl_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.QSimple8b)
-				cl_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+				// Simplebits
+				simplebits_chk := chunkenc.NewCLChunk()
+				simplebits_app, _ := simplebits_chk.Appender()
+				simplebits_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.Simplebits)
+				simplebits_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+
+				// Auto
+				auto_chk := chunkenc.NewCLChunk()
+				auto_app, _ := auto_chk.Appender()
+				auto_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.Auto)
+				auto_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+
+				// Huffman
+				huffman_chk := chunkenc.NewCLChunk()
+				huffman_app, _ := huffman_chk.Appender()
+				huffman_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.Huffman)
+				huffman_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+
+				// BitPacking
+				bitpacking_chk := chunkenc.NewCLChunk()
+				bitpacking_app, _ := bitpacking_chk.Appender()
+				bitpacking_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.BitPacking)
+				bitpacking_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+
+				// Varint
+				varint_chk := chunkenc.NewCLChunk()
+				varint_app, _ := varint_chk.Appender()
+				varint_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.Varint)
+				varint_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+
+				// PFor
+				pfor_chk := chunkenc.NewCLChunk()
+				pfor_app, _ := pfor_chk.Appender()
+				pfor_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.PFor)
+				pfor_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+
+				// Simple8b
+				simple8b_chk := chunkenc.NewCLChunk()
+				simple8b_app, _ := simple8b_chk.Appender()
+				simple8b_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.QSimple8b)
+				simple8b_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+
 				for i := batch * currChunkSize; i < (batch+1)*currChunkSize && i < len(vals); i += 1 {
 					uncompressed_data = append(uncompressed_data, vals[i].v)
 					gorilla_app.Append(int64(i), vals[i].v)
-					cl_app.Append(int64(i), vals[i].v)
+					simple8b_app.Append(int64(i), vals[i].v)
+					simplebits_app.Append(int64(i), vals[i].v)
+					bitpacking_app.Append(int64(i), vals[i].v)
+					varint_app.Append(int64(i), vals[i].v)
+					pfor_app.Append(int64(i), vals[i].v)
+					huffman_app.Append(int64(i), vals[i].v)
+					auto_app.Append(int64(i), vals[i].v)
 				}
-				cl_app.(*chunkenc.CLAppender).Compact()
 
-				// Simplebits
-				bitCounts, maxBits := chunkenc.BitStatistics(cl_app.(*chunkenc.CLAppender).Simplebits_buffer)
-				simplebits_chk := chunkenc.PackingAll(cl_app.(*chunkenc.CLAppender).Simplebits_buffer, chunkenc.BitSelectors(bitCounts, chunkenc.Simplebits_MaxSegmentsNum, maxBits))
+				simple8b_app.(*chunkenc.CLAppender).Compact()
+				simplebits_app.(*chunkenc.CLAppender).Compact()
+				huffman_app.(*chunkenc.CLAppender).Compact()
+				bitpacking_app.(*chunkenc.CLAppender).Compact()
+				varint_app.(*chunkenc.CLAppender).Compact()
+				pfor_app.(*chunkenc.CLAppender).Compact()
+				auto_app.(*chunkenc.CLAppender).Compact()
 
 				// SZ, MOST, Machete
-				var outSize uint64
-				comp_sz := chunkenc.SZ_Compress(1, uncompressed_data, &outSize, 0, ErrorBound, 0, 0, 0, 0, 0, 0, uint64(ChunkSize))
-				comp_most := chunkenc.MOST_Compress(uncompressed_data, ErrorBound, 5)
-				comp_machete := chunkenc.Machete_Compress(uncompressed_data, int64(len(uncompressed_data)), ErrorBound)
+				// var outSize uint64
+				// comp_sz := chunkenc.SZ_Compress(1, uncompressed_data, &outSize, 0, ErrorBound, 0, 0, 0, 0, 0, 0, uint64(ChunkSize))
+				// comp_most := chunkenc.MOST_Compress(uncompressed_data, ErrorBound, 5)
+				// comp_machete := chunkenc.Machete_Compress(uncompressed_data, int64(len(uncompressed_data)), ErrorBound)
+
+				// verify decompressed data correctness
+				// dec_sz := chunkenc.SZ_Decompress(1, comp_sz, uint64(len(comp_sz)), 0, 0, 0, 0, uint64(ChunkSize))
+				// dec_most := chunkenc.MOST_Decompress(comp_most, ErrorBound)
+				// dec_machete := chunkenc.Machete_Decompress(comp_machete, int64(len(comp_machete)), int64(ChunkSize))
+
+				// for i := 0; i < len(uncompressed_data); i += 1 {
+				// if math.Abs(dec_sz[i]-uncompressed_data[i]) > (1+1e-6)*ErrorBound {
+				// 	fmt.Printf("SZ Decompression Error > (%d,%f)(%f)\n", i, dec_sz[i], uncompressed_data[i])
+				// }
+				// if math.Abs(dec_most[i]-uncompressed_data[i]) > (1+1e-6)*ErrorBound {
+				// 	fmt.Printf("MOST Decompression Error > (%d,%f)(%f)\n", i, dec_most[i], uncompressed_data[i])
+				// }
+				// if math.Abs(dec_machete[i]-uncompressed_data[i]) > (1+1e-6)*ErrorBound {
+				// fmt.Printf("Machete Decompression Error > (%d,%f)(%f)\n", i, dec_machete[i], uncompressed_data[i])
+				// }
+				// }
 
 				// Timestamp bytes are the same for all algorithms
-				timestamp_total_bytes = cl_app.(*chunkenc.CLAppender).TimestampSize()
+				timestamp_total_bytes = simple8b_app.(*chunkenc.CLAppender).TimestampSize()
 
 				// Total bytes for each algorithm
 				gorilla_total_bytes += len(gorilla_chk.Bytes()) - timestamp_total_bytes
-				cl_total_bytes += len(cl_chk.Bytes()) - timestamp_total_bytes
-				simplebits_total_bytes += simplebits_chk.Len()
-				sz_total_bytes += len(comp_sz)
-				most_total_bytes += len(comp_most)
-				machete_total_bytes += len(comp_machete)
+				simple8b_total_bytes += simple8b_app.(*chunkenc.CLAppender).FloatSize()
+				simplebits_total_bytes += simplebits_app.(*chunkenc.CLAppender).FloatSize()
+				auto_total_bytes += auto_app.(*chunkenc.CLAppender).FloatSize()
+				// sz_total_bytes += len(comp_sz)
+				// most_total_bytes += len(comp_most)
+				// machete_total_bytes += len(comp_machete)
+				bitpacking_total_bytes += bitpacking_app.(*chunkenc.CLAppender).FloatSize()
+				varint_total_bytes += varint_app.(*chunkenc.CLAppender).FloatSize()
+				pfor_total_bytes += pfor_app.(*chunkenc.CLAppender).FloatSize()
+				huffman_total_bytes += huffman_app.(*chunkenc.CLAppender).FloatSize()
 				uncompressed_total_bytes += currChunkSize * 8
 			}
 		}
@@ -118,8 +202,492 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 		fmt.Printf(" > most_total_bytes: %d, most compression ratio: %f\n", most_total_bytes, float64(uncompressed_total_bytes)/float64(most_total_bytes))
 		fmt.Printf(" > machete_total_bytes: %d, machete compression ratio: %f\n", machete_total_bytes, float64(uncompressed_total_bytes)/float64(machete_total_bytes))
 		fmt.Printf(" > gorilla_total_bytes: %d, gorilla compression ratio: %f\n", gorilla_total_bytes, float64(uncompressed_total_bytes)/float64(gorilla_total_bytes))
-		fmt.Printf(" > cl_total_bytes: %d, cl compression ratio: %f\n", cl_total_bytes, float64(uncompressed_total_bytes)/float64(cl_total_bytes))
-		fmt.Printf(" > simplebits_total_bytes: %d, simplebits compression ratio: %f\n\n\n", simplebits_total_bytes, float64(uncompressed_total_bytes)/float64(simplebits_total_bytes))
+		fmt.Printf(" > simple8b_total_bytes: %d, simple8b compression ratio: %f\n", simple8b_total_bytes, float64(uncompressed_total_bytes)/float64(simple8b_total_bytes))
+		fmt.Printf(" > simplebits_total_bytes: %d, simplebits compression ratio: %f\n", simplebits_total_bytes, float64(uncompressed_total_bytes)/float64(simplebits_total_bytes))
+		fmt.Printf(" > bitpacking_total_bytes: %d, bitpacking compression ratio: %f\n", bitpacking_total_bytes, float64(uncompressed_total_bytes)/float64(bitpacking_total_bytes))
+		fmt.Printf(" > varint_total_bytes: %d, varint compression ratio: %f\n", varint_total_bytes, float64(uncompressed_total_bytes)/float64(varint_total_bytes))
+		fmt.Printf(" > pfor_total_bytes: %d, pfor compression ratio: %f\n\n\n", pfor_total_bytes, float64(uncompressed_total_bytes)/float64(pfor_total_bytes))
+		fmt.Printf(" > huffman_total_bytes: %d, huffman compression ratio: %f\n\n\n", huffman_total_bytes, float64(uncompressed_total_bytes)/float64(huffman_total_bytes))
+		fmt.Printf(" > auto_total_bytes: %d, auto compression ratio: %f\n\n\n", auto_total_bytes, float64(uncompressed_total_bytes)/float64(auto_total_bytes))
+	}
+}
+
+func BenchmarkIntegerCompression(b *testing.B) {
+	tb := &compressBenchmark{
+		logger: promslog.New(&promslog.Config{}),
+	}
+
+	// ErrorBound is absolute error bound for compression algorithms.
+	ErrorBounds := []float64{1e-2, 1e-3, 1e-4, 1e-5, 1e-6}
+	for _, ErrorBound := range ErrorBounds {
+		fmt.Printf("ErrorBound: %f\n", ErrorBound)
+		// The Whole dataset will be divided into chunks of ChunkSize for compression.
+		ChunkSize := 1000
+		Datasets := map[string]string{
+			"pamapv2": "/home/jzj/Datasets/PAMAP2_Dataset",
+			// "pamapv2":           "/home/jzj/Datasets/PAMAP2_Dataset_mini",
+			"ett":   "/home/jzj/Datasets/ETT",
+			"wisdm": "/home/jzj/Datasets/WISDM_Dataset/raw",
+			// "geolife":     "/home/jzj/Datasets/Geolife_Trajectories_1_3/Data/",
+			"electricity": "/home/jzj/Datasets/Electricity",
+		}
+
+		bitWidth := func(v uint64) int {
+			if v == 0 {
+				return 1
+			}
+			return bits.Len64(v)
+		}
+
+		for name, path := range Datasets {
+			fmt.Printf("Dataset: %s\n", name)
+
+			tb.samples = make([][]tvpair, 0, 8)
+			if err := tb.ReadDataset(name, path); err != nil {
+				return
+			}
+
+			var uncompressed_total_bytes int
+			var simple8b_total_bytes, simplebits_total_bytes, bitpacking_total_bytes, varint_total_bytes, pfor_total_bytes, gorilla_total_bytes, huffman_total_bytes, optimal_total_bytes int
+			var simple8b_total_time, simplebits_total_time, bitpacking_total_time, varint_total_time, pfor_total_time, gorilla_total_time, huffman_total_time time.Duration
+			// var simple8b_meta_total_bytes, simplebits_meta_total_bytes, bitpacking_meta_total_bytes, varint_meta_total_bytes, pfor_meta_total_bytes int
+
+			for _, vals := range tb.samples {
+				data_delta := make([]int64, 0, len(vals))
+				data_zigzag := make([]uint64, 0, len(vals))
+				curr_val := int64(0)
+				for i := 0; i < len(vals); i += 1 {
+					var f2i int64
+					if vals[i].v >= 0 {
+						f2i = int64(vals[i].v/(2*ErrorBound) + 0.5)
+					} else {
+						f2i = int64(vals[i].v/(2*ErrorBound) - 0.5)
+					}
+					fdelta := f2i - curr_val
+					curr_val = f2i
+
+					data_delta = append(data_delta, fdelta)
+
+					if fdelta >= 0 {
+						fdelta <<= 1
+					} else {
+						fdelta = -2*fdelta - 1
+					}
+
+					data_zigzag = append(data_zigzag, uint64(fdelta))
+					optimal_total_bytes += bitWidth(uint64(fdelta))
+				}
+
+				currChunkSize := min(ChunkSize, len(vals))
+
+				// Simplebits
+				// simplebits_chks := make([][]byte, 0, (len(vals)+currChunkSize-1)/currChunkSize)
+				start := time.Now()
+				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+					bitCounters, maxBits := chunkenc.BitStatistics(data_zigzag[begin:end])
+					bitSelectors, _ := chunkenc.BitSelectors(bitCounters, chunkenc.Simplebits_MaxSegmentsNum, maxBits, end-begin)
+					simplebits_chk := chunkenc.PackingAll(data_zigzag[begin:end], bitSelectors)
+					simplebits_total_bytes += simplebits_chk.Len()
+					// simplebits_meta_total_bytes += simplebits_meta_bytes
+
+					// simplebits_chks = append(simplebits_chks, simplebits_chk.Bytes())
+				}
+				simplebits_total_time += time.Since(start)
+
+				// start := time.Now()
+				// for _, chk := range simplebits_chks {
+				// 	br := chunkenc.NewBReader(chk)
+				// 	chunkenc.UnPackingAll(&br, len(chk))
+				// }
+				// simplebits_total_time += time.Since(start)
+
+				// Huffman
+				// huffman_chks := make([]*chunkenc.CLChunk, 0, (len(vals)+currChunkSize-1)/currChunkSize)
+				start = time.Now()
+				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+					huffman_chk := chunkenc.NewCLChunk()
+					huffman_app, _ := huffman_chk.Appender()
+					huffman_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+					huffman_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.Huffman)
+					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+					for j := begin; j < end; j += 1 {
+						huffman_app.Append(int64(j), vals[j].v)
+					}
+					huffman_app.(*chunkenc.CLAppender).Compact()
+					huffman_total_bytes += huffman_app.(*chunkenc.CLAppender).FloatSize()
+
+					// huffman_chks = append(huffman_chks, huffman_chk)
+				}
+				huffman_total_time += time.Since(start)
+
+				// start = time.Now()
+				// for _, chk := range huffman_chks {
+				// 	it := chk.Iterator(nil)
+				// 	for it.Next() != chunkenc.ValNone {
+				// 		it.At()
+				// 	}
+				// }
+				// huffman_total_time += time.Since(start)
+
+				// Gorilla
+				// gorilla_chks := make([]*chunkenc.XORChunk, 0, (len(vals)+currChunkSize-1)/currChunkSize)
+				start = time.Now()
+				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+					gorilla_chk := chunkenc.NewXORChunk()
+					gorilla_app, _ := gorilla_chk.Appender()
+					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+					for j := begin; j < end; j += 1 {
+						gorilla_app.Append(int64(j), vals[j].v)
+					}
+					gorilla_total_bytes += len(gorilla_chk.Bytes()) - (end-begin)/8 - 8
+
+					// gorilla_chks = append(gorilla_chks, gorilla_chk)
+				}
+				gorilla_total_time += time.Since(start)
+
+				// start = time.Now()
+				// for _, chk := range gorilla_chks {
+				// 	it := chk.Iterator(nil)
+				// 	for it.Next() != chunkenc.ValNone {
+				// 		it.At()
+				// 	}
+				// }
+				// gorilla_total_time += time.Since(start)
+
+				// BitPacking
+				// bitpacking_chks := make([][]byte, 0, (len(vals)+currChunkSize-1)/currChunkSize)
+				start = time.Now()
+				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+					bitpacking_chk := chunkenc.BitPackingAll(data_zigzag[begin:end])
+					bitpacking_total_bytes += bitpacking_chk.Len()
+					// bitpacking_meta_total_bytes += bitpacking_meta_bytes
+
+					// bitpacking_chks = append(bitpacking_chks, bitpacking_chk.Bytes())
+				}
+				bitpacking_total_time += time.Since(start)
+
+				// start = time.Now()
+				// for _, chk := range bitpacking_chks {
+				// 	br := chunkenc.NewBReader(chk)
+				// 	chunkenc.UnBitPackingAll(&br, len(chk))
+				// }
+				// bitpacking_total_time += time.Since(start)
+
+				// Varint
+				// varint_chks := make([][]byte, 0, (len(vals)+currChunkSize-1)/currChunkSize)
+				start = time.Now()
+				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+					varint_chk := chunkenc.VarintPackingAll(data_zigzag[begin:end])
+					varint_total_bytes += varint_chk.Len()
+					// varint_meta_total_bytes += varint_meta_bytes
+
+					// varint_chks = append(varint_chks, varint_chk.Bytes())
+				}
+				varint_total_time += time.Since(start)
+
+				// start = time.Now()
+				// for _, chk := range varint_chks {
+				// 	br := chunkenc.NewBReader(chk)
+				// 	chunkenc.UnVarintPackingAll(&br, len(chk))
+				// }
+				// varint_total_time += time.Since(start)
+
+				// PFor
+				// pfor_chks := make([][]byte, 0, (len(vals)+currChunkSize-1)/currChunkSize)
+				start = time.Now()
+				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+					pfor_chk := chunkenc.PForPackingAll(data_delta[begin:end])
+					pfor_total_bytes += pfor_chk.Len()
+					// pfor_meta_total_bytes += pfor_meta_bytes
+
+					// pfor_chks = append(pfor_chks, pfor_chk.Bytes())
+				}
+				pfor_total_time += time.Since(start)
+
+				// start = time.Now()
+				// for _, chk := range pfor_chks {
+				// 	br := chunkenc.NewBReader(chk)
+				// 	chunkenc.UnPForPackingAll(&br, len(chk))
+				// }
+				// pfor_total_time += time.Since(start)
+
+				// Simple8b
+				// simple8b_chks := make([][]uint64, 0, (len(vals)+currChunkSize-1)/currChunkSize)
+				start = time.Now()
+				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+					simple8b_chk, _ := chunkenc.EncodeAll(data_zigzag[begin:end])
+					simple8b_total_bytes += len(simple8b_chk)
+					// simple8b_meta_total_bytes += simple8b_meta_bytes
+
+					// simple8b_chks = append(simple8b_chks, simple8b_chk)
+				}
+				simple8b_total_time += time.Since(start)
+
+				// start = time.Now()
+				// for _, chk := range simple8b_chks {
+				// 	uncompressed_chk := make([]uint64, currChunkSize)
+				// 	chunkenc.DecodeAll(uncompressed_chk, chk)
+				// }
+				// simple8b_total_time += time.Since(start)
+
+				uncompressed_total_bytes += len(vals) * 8
+			}
+
+			fmt.Printf(" > uncompressed_total_bytes: %d, optimal compression ratio: %f\n",
+				uncompressed_total_bytes,
+				float64(uncompressed_total_bytes*8)/float64(optimal_total_bytes))
+			fmt.Printf(" > gorilla_total_bytes: %d, gorilla compression ratio: %f, time: %s, throughput: %f MB/s\n",
+				gorilla_total_bytes,
+				float64(uncompressed_total_bytes)/float64(gorilla_total_bytes),
+				gorilla_total_time,
+				float64(uncompressed_total_bytes)/(float64(1<<20)*float64(gorilla_total_time)/float64(time.Second)))
+			fmt.Printf(" > simple8b_total_bytes: %d, simple8b compression ratio: %f, time: %s, throughput: %f MB/s\n",
+				simple8b_total_bytes,
+				float64(uncompressed_total_bytes)/float64(simple8b_total_bytes),
+				simple8b_total_time,
+				float64(uncompressed_total_bytes)/(float64(1<<20)*float64(simple8b_total_time)/float64(time.Second)))
+			fmt.Printf(" > bitpacking_total_bytes: %d, bitpacking compression ratio: %f, time: %s, throughput: %f MB/s\n",
+				bitpacking_total_bytes,
+				float64(uncompressed_total_bytes)/float64(bitpacking_total_bytes),
+				bitpacking_total_time,
+				float64(uncompressed_total_bytes)/(float64(1<<20)*float64(bitpacking_total_time)/float64(time.Second)))
+			fmt.Printf(" > varint_total_bytes: %d, varint compression ratio: %f, time: %s, throughput: %f MB/s\n",
+				varint_total_bytes,
+				float64(uncompressed_total_bytes)/float64(varint_total_bytes),
+				varint_total_time,
+				float64(uncompressed_total_bytes)/(float64(1<<20)*float64(varint_total_time)/float64(time.Second)))
+			fmt.Printf(" > pfor_total_bytes: %d, pfor compression ratio: %f, time: %s, throughput: %f MB/s\n",
+				pfor_total_bytes,
+				float64(uncompressed_total_bytes)/float64(pfor_total_bytes),
+				pfor_total_time,
+				float64(uncompressed_total_bytes)/(float64(1<<20)*float64(pfor_total_time)/float64(time.Second)))
+			fmt.Printf(" > simplebits_total_bytes: %d, simplebits compression ratio: %f, time: %s, throughput: %f MB/s\n\n\n\n",
+				simplebits_total_bytes,
+				float64(uncompressed_total_bytes)/float64(simplebits_total_bytes),
+				simplebits_total_time,
+				float64(uncompressed_total_bytes)/(float64(1<<20)*float64(simplebits_total_time)/float64(time.Second)))
+			fmt.Printf(" > huffman_total_bytes: %d, huffman compression ratio: %f, time: %s, throughput: %f MB/s\n\n\n\n",
+				huffman_total_bytes,
+				float64(uncompressed_total_bytes)/float64(huffman_total_bytes),
+				huffman_total_time,
+				float64(uncompressed_total_bytes)/(float64(1<<20)*float64(huffman_total_time)/float64(time.Second)))
+		}
+	}
+}
+
+type DataCounter struct {
+	Bits       int
+	Proportion float64
+	Count      uint64
+
+	AvgLessAndEqualN float64
+	AvgEqualN        float64
+	AvgGreaterN      float64
+}
+
+func DatasetStatistics(src []uint64) ([]DataCounter, int) {
+	bitCounters := make([]DataCounter, 64+1)
+	maxBits := 0
+
+	// Count the number of value corresponding to every bit width
+	for _, v := range src {
+		width := chunkenc.BitWidth(v)
+		bitCounters[width].Count++
+	}
+
+	for bits := 1; bits <= 64; bits++ {
+		if bitCounters[bits].Count > 0 {
+			bitCounters[bits].Proportion = float64(bitCounters[bits].Count) / float64(len(src))
+			maxBits = bits
+		}
+		bitCounters[bits].Bits = bits
+	}
+
+	// Calculate average N for data points less than or equal to certain bits width
+	for bits := 1; bits <= maxBits; bits++ {
+		totalN := uint64(0)
+		countN := uint64(0)
+
+		for i := 0; i < len(src); i++ {
+			currN := uint64(0)
+			for i < len(src) && chunkenc.BitWidth(src[i]) <= bits {
+				currN++
+				i++
+			}
+			if currN > 0 {
+				totalN += currN
+				countN++
+			}
+		}
+
+		if countN == 0 {
+			bitCounters[bits].AvgLessAndEqualN = 0
+		} else {
+			bitCounters[bits].AvgLessAndEqualN = float64(totalN) / float64(countN)
+		}
+	}
+
+	// Calculate average N for data points equal to certain bits width
+	for bits := 1; bits <= maxBits; bits++ {
+		totalN := uint64(0)
+		countN := uint64(0)
+
+		for i := 0; i < len(src); i++ {
+			currN := uint64(0)
+			for i < len(src) && chunkenc.BitWidth(src[i]) == bits {
+				currN++
+				i++
+			}
+			if currN > 0 {
+				totalN += currN
+				countN++
+			}
+		}
+
+		if countN == 0 {
+			bitCounters[bits].AvgEqualN = 0
+		} else {
+			bitCounters[bits].AvgEqualN = float64(totalN) / float64(countN)
+		}
+	}
+
+	// Calculate average N for data points greater than certain bits width
+	for bits := 1; bits <= maxBits; bits++ {
+		totalN := uint64(0)
+		countN := uint64(0)
+
+		for i := 0; i < len(src); i++ {
+			currN := uint64(0)
+			for i < len(src) && chunkenc.BitWidth(src[i]) > bits {
+				currN++
+				i++
+			}
+			if currN > 0 {
+				totalN += currN
+				countN++
+			}
+		}
+
+		if countN == 0 {
+			bitCounters[bits].AvgGreaterN = 0
+		} else {
+			bitCounters[bits].AvgGreaterN = float64(totalN) / float64(countN)
+		}
+	}
+
+	return bitCounters, maxBits
+}
+
+func BenchmarkDatasets(b *testing.B) {
+	tb := &compressBenchmark{
+		logger: promslog.New(&promslog.Config{}),
+	}
+
+	// ErrorBound is absolute error bound for compression algorithms.
+	ErrorBound := 1e-4
+	Datasets := map[string]string{
+		"pamapv2": "/home/jzj/Datasets/PAMAP2_Dataset/Protocol/subject101.dat",
+		// "ett":         "/home/jzj/Datasets/ETT/ETTh1.csv",
+		// "wisdm":       "/home/jzj/Datasets/WISDM_Dataset/raw/phone/accel/data_1600_accel_phone.txt",
+		// "electricity": "/home/jzj/Datasets/Electricity/LD2011_2014.txt",
+	}
+
+	Timeseries := map[string]int{
+		"pamapv2":     10,
+		"ett":         0,
+		"wisdm":       0,
+		"electricity": 0,
+	}
+
+	for name, path := range Datasets {
+		fmt.Printf("Dataset: %s\n", name)
+
+		tb.samples = make([][]tvpair, 0, 8)
+		switch name {
+		case "pamapv2":
+			tb.readPAMAP2File(path)
+		case "ett":
+			tb.readETTFile(path)
+		case "wisdm":
+			tb.readWISDMFile(path)
+		case "electricity":
+			tb.readElectricityFile(path)
+		}
+		vals := tb.samples[Timeseries[name]]
+
+		// data_delta := make([]int64, 0, len(vals))
+		data_zigzag := make([]uint64, 0, len(vals))
+		curr_val := int64(0)
+		for i := 0; i < len(vals); i += 1 {
+			var f2i int64
+			if vals[i].v >= 0 {
+				f2i = int64(vals[i].v/(2*ErrorBound) + 0.5)
+			} else {
+				f2i = int64(vals[i].v/(2*ErrorBound) - 0.5)
+			}
+			fdelta := f2i - curr_val
+			curr_val = f2i
+
+			// data_delta = append(data_delta, fdelta)
+
+			if fdelta >= 0 {
+				fdelta <<= 1
+			} else {
+				fdelta = -2*fdelta - 1
+			}
+
+			data_zigzag = append(data_zigzag, uint64(fdelta))
+		}
+
+		dataCounters, maxBits := DatasetStatistics(data_zigzag)
+
+		_, _, stat := chunkenc.EncodeAllWithStatistics(data_zigzag)
+		selectors := []chunkenc.BitSelector{
+			{Bits: 0, Selector: 0, N: 240},
+			{Bits: 0, Selector: 1, N: 120},
+			{Bits: 1, Selector: 2, N: 60},
+			{Bits: 2, Selector: 3, N: 30},
+			{Bits: 3, Selector: 4, N: 20},
+			{Bits: 4, Selector: 5, N: 15},
+			{Bits: 5, Selector: 6, N: 12},
+			{Bits: 6, Selector: 7, N: 10},
+			{Bits: 7, Selector: 8, N: 8},
+			{Bits: 8, Selector: 9, N: 7},
+			{Bits: 10, Selector: 10, N: 6},
+			{Bits: 12, Selector: 11, N: 5},
+			{Bits: 15, Selector: 12, N: 4},
+			{Bits: 20, Selector: 13, N: 3},
+			{Bits: 30, Selector: 14, N: 2},
+			{Bits: 60, Selector: 15, N: 1},
+		}
+		fmt.Printf("Simple8b Statistics: \n")
+		fmt.Printf("Bits\tSelector\tN\tCount\n")
+		for i, count := range stat {
+			fmt.Printf("|%d\t|%d\t|%d\t|%d|\n",
+				selectors[i].Bits,
+				selectors[i].Selector,
+				selectors[i].N,
+				count)
+		}
+		fmt.Printf("\n\n")
+
+		fmt.Printf("Bits\tProportion\tCount\tAvgLessAndEqualN\tAvgEqualN\tAvgGreaterN\n")
+		for bits := 1; bits <= maxBits; bits++ {
+			fmt.Printf("%d\t%f\t%d\t%f\t%f\t%f\n",
+				dataCounters[bits].Bits,
+				dataCounters[bits].Proportion,
+				dataCounters[bits].Count,
+				dataCounters[bits].AvgLessAndEqualN,
+				dataCounters[bits].AvgEqualN,
+				dataCounters[bits].AvgGreaterN)
+		}
+		fmt.Printf("\n\n")
+
 	}
 }
 
@@ -144,8 +712,8 @@ func BenchmarkCompress(b *testing.B) {
 	}
 
 	dir := filepath.Join(tb.outPath, "storage")
-	chunkenc.DefaultCtype = chunkenc.QSimple8b
-	chunkenc.DefaultErrbound = 0.01
+	chunkenc.DefaultCtype = chunkenc.Auto
+	chunkenc.DefaultErrbound = 1e-2
 
 	st, err := tsdb.Open(dir, tb.logger, nil, &tsdb.Options{
 		RetentionDuration:    int64(3650 * 24 * time.Hour / time.Millisecond),
@@ -155,7 +723,7 @@ func BenchmarkCompress(b *testing.B) {
 		SamplesPerChunk:      1000,
 		OutOfOrderCapMax:     255,
 		WALSegmentSize:       -1,
-		ErrorBound:           0.01,
+		ErrorBound:           chunkenc.DefaultErrbound,
 	}, tsdb.NewDBStats())
 	if err != nil {
 		return
@@ -165,7 +733,7 @@ func BenchmarkCompress(b *testing.B) {
 	tb.samples = make([][]tvpair, 0, 8)
 	tb.scrape = make([]*lb, 0, len(tb.samples))
 
-	if err := tb.ReadDataset("household_voltage", "/home/jzj/Datasets/HouseholdVoltage"); err != nil {
+	if err := tb.ReadDataset("pamapv2", "/home/jzj/Datasets/PAMAP2_Dataset"); err != nil {
 		return
 	}
 
@@ -177,6 +745,8 @@ func BenchmarkCompress(b *testing.B) {
 	}
 
 	var total uint64
+
+	// timeStart := time.Now()
 
 	dur, err := measureTime("ingestScrapes", func() error {
 		if err := tb.startProfiling(); err != nil {
@@ -225,7 +795,7 @@ func BenchmarkCompress(b *testing.B) {
 	// fmt.Println(" > total OOO chunk size:", tsdb.OOOCompressedSize_test)
 	// fmt.Println(" > total OOO chunk timestamp size:", tsdb.OOOChunksTimestamp_test)
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(120 * time.Second)
 
 	m1, err := labels.NewMatcher(labels.MatchEqual, "FileID", "0")
 	if err != nil {
@@ -244,6 +814,9 @@ func BenchmarkCompress(b *testing.B) {
 		if err := tb.storage.Close(); err != nil {
 			return err
 		}
+
+		// timeAfterCompaction := time.Since(timeStart)
+		// fmt.Println(" > samples/sec (with compaction):", float64(total)/timeAfterCompaction.Seconds())
 
 		return tb.stopProfiling()
 	}); err != nil {

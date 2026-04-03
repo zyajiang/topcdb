@@ -230,6 +230,13 @@ func main() {
 	benchWriteNumScrapes := tsdbBenchWriteCmd.Flag("scrapes", "Number of scrapes to simulate.").Default("3000").Int()
 	benchSamplesFile := tsdbBenchWriteCmd.Arg("file", "Input file with samples data, default is ("+filepath.Join("..", "..", "tsdb", "testdata", "20kseries.json")+").").Default(filepath.Join("..", "..", "tsdb", "testdata", "20kseries.json")).String()
 
+	tsdbBenchCompressCmd := tsdbBenchCmd.Command("compress", "Run a compression performance benchmark.")
+	benchCompressOutPath := tsdbBenchCompressCmd.Flag("out", "Set the output path.").Default("benchout").String()
+	benchDataset := tsdbBenchCompressCmd.Flag("dataset", "Input dataset with samples data").Default("pamapv2").String()
+	benchSamplesDir := tsdbBenchCompressCmd.Flag("dir", "Input directory with samples data").Default(filepath.Join("..", "..", "tsdb", "testdata", "topcdb", "pamapv2")).String()
+	benchCompressAlgo := tsdbBenchCompressCmd.Flag("algorithm", "Compression algorithm to benchmark.").Default("qsimple8b").String()
+	benchErrorBound := tsdbBenchCompressCmd.Flag("errobound", "Error bound for the compression algorithm.").Default("0.01").Float64()
+
 	tsdbAnalyzeCmd := tsdbCmd.Command("analyze", "Analyze churn, label pair cardinality and compaction efficiency.")
 	analyzePath := tsdbAnalyzeCmd.Arg("db path", "Database path (default is "+defaultDBPath+").").Default(defaultDBPath).String()
 	analyzeBlockID := tsdbAnalyzeCmd.Arg("block id", "Block to analyze (default is the last block).").String()
@@ -396,6 +403,9 @@ func main() {
 			*testRulesDebug,
 			*testRulesFiles...),
 		)
+
+	case tsdbBenchCompressCmd.FullCommand():
+		os.Exit(checkErr(benchmarkCompress(*benchCompressOutPath, *benchDataset, *benchSamplesDir, *benchCompressAlgo, *benchErrorBound)))
 
 	case tsdbBenchWriteCmd.FullCommand():
 		os.Exit(checkErr(benchmarkWrite(*benchWriteOutPath, *benchSamplesFile, *benchWriteNumMetrics, *benchWriteNumScrapes)))

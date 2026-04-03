@@ -6,7 +6,7 @@ import (
 )
 
 type TreeNode struct {
-	val   int
+	val   uint64
 	times int
 	left  *TreeNode
 	right *TreeNode
@@ -45,7 +45,7 @@ type HuffmanDecoder struct {
 	root *TreeNode
 	br   bstreamReader
 
-	val int64
+	val uint64
 }
 
 func NewHuffmanDecoder(b []byte, ptr1 uint32) *HuffmanDecoder {
@@ -83,16 +83,16 @@ func (hd *HuffmanDecoder) Next() bool {
 			node = node.left
 		}
 	}
-	hd.val += int64(node.val)
+	hd.val = node.val
 	return true
 }
 
-func (hd *HuffmanDecoder) Read() int64 {
+func (hd *HuffmanDecoder) Read() uint64 {
 	return hd.val
 }
 
-func HuffmanEncodeWithoutTimesMap(input *[]int, ptr int) *bstream {
-	m := make(map[int]int)
+func HuffmanEncodeWithoutTimesMap(input *[]uint64, ptr int) *bstream {
+	m := make(map[uint64]int)
 	for _, v := range *input {
 		cnt, ok := m[v]
 		if ok {
@@ -113,7 +113,7 @@ func HuffmanEncodeWithoutTimesMap(input *[]int, ptr int) *bstream {
 	}
 
 	Tree := initHuffmanTree(nodelist)
-	encodeTab := make(map[int]string)
+	encodeTab := make(map[uint64]string)
 	createEncodingTable(Tree, encodeTab)
 	b := serializeHuffmanTree(m, ptr)
 	if b != nil {
@@ -122,27 +122,18 @@ func HuffmanEncodeWithoutTimesMap(input *[]int, ptr int) *bstream {
 	return b
 }
 
-func deserializeHuffmanTree(b []byte, ptr int) (map[int]int, int) {
-	m := make(map[int]int)
+func deserializeHuffmanTree(b []byte, ptr int) (map[uint64]int, int) {
+	m := make(map[uint64]int)
 
 	len1, len2 := readHuffmanMeta(b, ptr)
 	valueDecoder := NewSimple8bDecoder(b[ptr+8 : ptr+8+int(len1)])
 	timesDecoder := NewSimple8bDecoder(b[ptr+8+int(len1) : ptr+8+int(len1)+int(len2)])
 
-	t, v := 0, 0
+	t, v := 0, uint64(0)
 	for valueDecoder.Next() && timesDecoder.Next() {
-		if t == 0 {
-			value := int(valueDecoder.Read())
-			if value%2 == 0 {
-				value = value / 2
-			} else {
-				value = -(value + 1) / 2
-			}
-			v = value
-		} else {
-			value := int(valueDecoder.Read())
-			v += value
-		}
+		value := valueDecoder.Read()
+		v += value
+
 		times := int(timesDecoder.Read())
 		if times%2 == 0 {
 			times = times / 2
@@ -156,23 +147,18 @@ func deserializeHuffmanTree(b []byte, ptr int) (map[int]int, int) {
 	return m, ptr + 8 + int(len1) + int(len2)
 }
 
-func serializeHuffmanTree(timesTab map[int]int, ptr int) *bstream {
+func serializeHuffmanTree(timesTab map[uint64]int, ptr int) *bstream {
 	valueEncoder, timesEncoder := NewSimple8bEncoder(), NewSimple8bEncoder()
-	keys := make([]int, 0)
+	keys := make([]uint64, 0)
 	for key := range timesTab {
 		keys = append(keys, key)
 	}
-	sort.Ints(keys)
-	val, times := keys[0], 0
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	lastKey, times := uint64(0), 0
 
-	if keys[0] < 0 {
-		valueEncoder.Write(uint64(-2*keys[0] - 1))
-	} else {
-		valueEncoder.Write(uint64(2 * keys[0]))
-	}
-	for _, key := range keys[1:] {
-		valueEncoder.Write(uint64(key - val))
-		val = key
+	for _, key := range keys {
+		valueEncoder.Write(key - lastKey)
+		lastKey = key
 	}
 
 	for _, key := range keys {
@@ -218,7 +204,7 @@ func initHuffmanTree(nodelist MinHeap) *TreeNode {
 	return nodelist[0]
 }
 
-func createEncodingTable(node *TreeNode, encodeTab map[int]string) {
+func createEncodingTable(node *TreeNode, encodeTab map[uint64]string) {
 	tmp := make([]byte, 0)
 	var dfs func(treeNode *TreeNode)
 	dfs = func(root *TreeNode) {
@@ -237,7 +223,7 @@ func createEncodingTable(node *TreeNode, encodeTab map[int]string) {
 	dfs(node)
 }
 
-func huffmanEncoding(input *[]int, encodeTab map[int]string, b *bstream) {
+func huffmanEncoding(input *[]uint64, encodeTab map[uint64]string, b *bstream) {
 	for _, v := range *input {
 		for _, c := range encodeTab[v] {
 			if c == '1' {

@@ -62,6 +62,14 @@ func (b *bstream) bytes() []byte {
 	return b.stream
 }
 
+func (b *bstream) Bytes() []byte {
+	return b.stream
+}
+
+func (b *bstream) Len() int {
+	return len(b.stream)
+}
+
 type bit bool
 
 const (
@@ -124,6 +132,18 @@ type bstreamReader struct {
 	buffer uint64 // The current buffer, filled from the stream, containing up to 8 bytes from which read bits.
 	valid  uint8  // The number of right-most bits valid to read (from left) in the current 8 byte buffer.
 	last   byte   // A copy of the last byte of the stream.
+}
+
+func NewBReader(b []byte) bstreamReader {
+	// The last byte of the stream can be updated later, so we take a copy.
+	var last byte
+	if len(b) > 0 {
+		last = b[len(b)-1]
+	}
+	return bstreamReader{
+		stream: b,
+		last:   last,
+	}
 }
 
 func newBReader(b []byte) bstreamReader {

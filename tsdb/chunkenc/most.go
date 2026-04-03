@@ -184,15 +184,15 @@ func MOST_Compress(input []float64, errbound float64, MIN_SEGMENT_LEN int) []byt
 	}
 
 	basestream.b.count = 0
-	vdelta8b, err := EncodeAll(vdeltas)
+	vdeltabyte, err := EncodeAll(vdeltas)
 	if err != nil {
 		return nil
 	}
-	for _, b := range vdelta8b[:] {
-		basestream.b.writeBits(b, 64)
+	for _, b := range vdeltabyte[:] {
+		basestream.b.writeByte(b)
 	}
 	basestream.b.count = 0
-	basestream.b.writeBits(uint64(len(vdelta8b)), 32)
+	basestream.b.writeBits(uint64(len(vdeltabyte)), 32)
 	basestream.b.writeBits(uint64(len(segments)), 32)
 	return basestream.b.bytes()
 }
@@ -207,7 +207,7 @@ func MOST_Decompress(input []byte, errbound float64) []float64 {
 	)
 
 	segmentLen = binary.BigEndian.Uint32(input[len(input)-4:])
-	vdeltaLen = 8 * binary.BigEndian.Uint32(input[len(input)-8:len(input)-4])
+	vdeltaLen = binary.BigEndian.Uint32(input[len(input)-8 : len(input)-4])
 	decoder = NewSimple8bDecoder(input[len(input)-8-int(vdeltaLen) : len(input)-8])
 	br = newBReader(input[:len(input)-8-int(vdeltaLen)])
 

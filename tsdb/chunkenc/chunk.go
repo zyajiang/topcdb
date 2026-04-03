@@ -30,6 +30,7 @@ const (
 	EncXOR
 	EncHistogram
 	EncFloatHistogram
+	EncCL
 )
 
 func (e Encoding) String() string {
@@ -42,18 +43,20 @@ func (e Encoding) String() string {
 		return "histogram"
 	case EncFloatHistogram:
 		return "floathistogram"
+	case EncCL:
+		return "compactable"
 	}
 	return "<unknown>"
 }
 
 // IsValidEncoding returns true for supported encodings.
 func IsValidEncoding(e Encoding) bool {
-	return e == EncXOR || e == EncHistogram || e == EncFloatHistogram
+	return e == EncXOR || e == EncHistogram || e == EncFloatHistogram || e == EncCL
 }
 
 const (
 	// MaxBytesPerXORChunk is the maximum size an XOR chunk can be.
-	MaxBytesPerXORChunk = 1024
+	MaxBytesPerXORChunk = 32768
 	// TargetBytesPerHistogramChunk sets a size target for each histogram chunk.
 	TargetBytesPerHistogramChunk = 1024
 	// MinSamplesPerHistogramChunk sets a minimum sample count for histogram chunks. This is desirable because a single
@@ -185,7 +188,7 @@ func (v ValueType) String() string {
 func (v ValueType) ChunkEncoding() Encoding {
 	switch v {
 	case ValFloat:
-		return EncXOR
+		return EncCL
 	case ValHistogram:
 		return EncHistogram
 	case ValFloatHistogram:
@@ -198,7 +201,7 @@ func (v ValueType) ChunkEncoding() Encoding {
 func (v ValueType) NewChunk() (Chunk, error) {
 	switch v {
 	case ValFloat:
-		return NewXORChunk(), nil
+		return NewCLChunk(), nil
 	case ValHistogram:
 		return NewHistogramChunk(), nil
 	case ValFloatHistogram:
@@ -282,6 +285,7 @@ type pool struct {
 	xor            sync.Pool
 	histogram      sync.Pool
 	floatHistogram sync.Pool
+	cl             sync.Pool
 }
 
 // NewPool returns a new pool.
@@ -302,6 +306,11 @@ func NewPool() Pool {
 				return &FloatHistogramChunk{b: bstream{}}
 			},
 		},
+		cl: sync.Pool{
+			New: func() interface{} {
+				return &CLChunk{b: bstream{}}
+			},
+		},
 	}
 }
 
@@ -314,6 +323,8 @@ func (p *pool) Get(e Encoding, b []byte) (Chunk, error) {
 		c = p.histogram.Get().(*HistogramChunk)
 	case EncFloatHistogram:
 		c = p.floatHistogram.Get().(*FloatHistogramChunk)
+	case EncCL:
+		c = p.cl.Get().(*CLChunk)
 	default:
 		return nil, fmt.Errorf("invalid chunk encoding %q", e)
 	}
@@ -335,6 +346,9 @@ func (p *pool) Put(c Chunk) error {
 	case EncFloatHistogram:
 		_, ok = c.(*FloatHistogramChunk)
 		sp = &p.floatHistogram
+	case EncCL:
+		_, ok = c.(*CLChunk)
+		sp = &p.cl
 	default:
 		return fmt.Errorf("invalid chunk encoding %q", c.Encoding())
 	}
@@ -361,6 +375,8 @@ func FromData(e Encoding, d []byte) (Chunk, error) {
 		return &HistogramChunk{b: bstream{count: 0, stream: d}}, nil
 	case EncFloatHistogram:
 		return &FloatHistogramChunk{b: bstream{count: 0, stream: d}}, nil
+	case EncCL:
+		return &CLChunk{b: bstream{count: 0, stream: d}}, nil
 	}
 	return nil, fmt.Errorf("invalid chunk encoding %q", e)
 }
@@ -374,6 +390,8 @@ func NewEmptyChunk(e Encoding) (Chunk, error) {
 		return NewHistogramChunk(), nil
 	case EncFloatHistogram:
 		return NewFloatHistogramChunk(), nil
+	case EncCL:
+		return NewCLChunk(), nil
 	}
 	return nil, fmt.Errorf("invalid chunk encoding %q", e)
 }

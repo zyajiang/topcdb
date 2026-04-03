@@ -25,7 +25,7 @@ func TestPackingAll(t *testing.T) {
 	n := 100000
 	src := generateUInt64Slice(n)
 	bitCounts, maxBits := BitStatistics(src)
-	bitSelectors := BitSelectors(bitCounts, 16, maxBits, len(src))
+	bitSelectors, _ := BitSelectors(bitCounts, 16, maxBits, len(src))
 
 	b := PackingAll(src, bitSelectors)
 	br := newBReader(b.bytes())
@@ -46,6 +46,35 @@ func TestBitPackingAll(t *testing.T) {
 	br := newBReader(b.bytes())
 	unpacked := UnBitPackingAll(&br, n)
 
+	if len(unpacked) != len(src) {
+		t.Fatalf("unpacked length not equal to source length: got %d, want %d", len(unpacked), len(src))
+	}
+
+	for i := range src {
+		if src[i] != unpacked[i] {
+			t.Fatalf("unpacked value not equal to source value at index %d: got %d, want %d", i, unpacked[i], src[i])
+		}
+	}
+}
+
+func TestBitPackingDecoder(t *testing.T) {
+	n := 100000
+	src := generateUInt64Slice(n)
+
+	// 1. Compress the data.
+	b := BitPackingAll(src)
+
+	// 2. Create a new decoder.
+	decoder := NewBitPackingDecoder(b.bytes(), n)
+
+	// 3. Unpack the data using the decoder.
+	unpacked := make([]uint64, 0, n)
+	for decoder.Next() {
+		val := decoder.Read()
+		unpacked = append(unpacked, val)
+	}
+
+	// 4. Verify the unpacked data.
 	if len(unpacked) != len(src) {
 		t.Fatalf("unpacked length not equal to source length: got %d, want %d", len(unpacked), len(src))
 	}

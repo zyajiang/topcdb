@@ -15,7 +15,7 @@ package chunkenc
 // ├──────────────┼─────────────────────────────────────────────────────────────┤
 // │      N       │     240  120  60  30  20  15  12  10  8  7  6  5  4  3  2  1│
 // ├──────────────┼─────────────────────────────────────────────────────────────┤
-// │   Wasted Bits│      60   60   0   0   0   0  12   0  4  4  0  0  0  0  0  0│
+// │   Wasted Bits│      60   60   0   0   0   0   0   0  4  4  0  0  0  0  0  0│
 // └──────────────┴─────────────────────────────────────────────────────────────┘
 //
 // For example, when the number of values can be encoded using 4 bits, selected 5 is encoded in the
@@ -349,95 +349,171 @@ func Encode(src []uint64) (value uint64, n int, err error) {
 	}
 }
 
-// Encode returns a packed slice of the values from src.  If a value is over
-// 1 << 60, an error is returned.  The input src is modified to avoid extra
-// allocations.  If you need to re-use, use a copy.
-func EncodeAll(src []uint64) ([]uint64, error, []uint64) {
-	var statistics []uint64
-	statistics = make([]uint64, 16)
-
+// EncodeAll returns a packed slice of the values from src. If a value is over
+// 1 << 60, an error is returned.
+func EncodeAll(src []uint64) ([]byte, error) {
 	i := 0
 
-	// Re-use the input slice and write encoded values back in place
-	dst := src
-	j := 0
+	// Pre-allocate a byte slice with a reasonable capacity.
+	// Each uint64 becomes 8 bytes.
+	dst := make([]byte, 0, len(src)*8)
+	var b [8]byte
 
 	for {
 		if i >= len(src) {
 			break
 		}
 		remaining := src[i:]
+		var encoded uint64
 
 		if canPack(remaining, 240, 0) {
-			dst[j] = 0
+			encoded = 0
+			i += 240
+		} else if canPack(remaining, 120, 0) {
+			encoded = 1 << 60
+			i += 120
+		} else if canPack(remaining, 60, 1) {
+			encoded = pack60(src[i : i+60])
+			i += 60
+		} else if canPack(remaining, 30, 2) {
+			encoded = pack30(src[i : i+30])
+			i += 30
+		} else if canPack(remaining, 20, 3) {
+			encoded = pack20(src[i : i+20])
+			i += 20
+		} else if canPack(remaining, 15, 4) {
+			encoded = pack15(src[i : i+15])
+			i += 15
+		} else if canPack(remaining, 12, 5) {
+			encoded = pack12(src[i : i+12])
+			i += 12
+		} else if canPack(remaining, 10, 6) {
+			encoded = pack10(src[i : i+10])
+			i += 10
+		} else if canPack(remaining, 8, 7) {
+			encoded = pack8(src[i : i+8])
+			i += 8
+		} else if canPack(remaining, 7, 8) {
+			encoded = pack7(src[i : i+7])
+			i += 7
+		} else if canPack(remaining, 6, 10) {
+			encoded = pack6(src[i : i+6])
+			i += 6
+		} else if canPack(remaining, 5, 12) {
+			encoded = pack5(src[i : i+5])
+			i += 5
+		} else if canPack(remaining, 4, 15) {
+			encoded = pack4(src[i : i+4])
+			i += 4
+		} else if canPack(remaining, 3, 20) {
+			encoded = pack3(src[i : i+3])
+			i += 3
+		} else if canPack(remaining, 2, 30) {
+			encoded = pack2(src[i : i+2])
+			i += 2
+		} else if canPack(remaining, 1, 60) {
+			encoded = pack1(src[i : i+1])
+			i += 1
+		} else {
+			return nil, fmt.Errorf("value out of bounds")
+		}
+		binary.BigEndian.PutUint64(b[:], encoded)
+		dst = append(dst, b[:]...)
+	}
+	return dst, nil
+}
+
+// EncodeAll returns a packed slice of the values from src. If a value is over
+// 1 << 60, an error is returned.
+func EncodeAllWithStatistics(src []uint64) ([]byte, error, []uint64) {
+	var statistics []uint64
+	statistics = make([]uint64, 16)
+
+	i := 0
+
+	// Pre-allocate a byte slice with a reasonable capacity.
+	// Each uint64 becomes 8 bytes.
+	dst := make([]byte, 0, len(src)*8)
+	var b [8]byte
+
+	for {
+		if i >= len(src) {
+			break
+		}
+		remaining := src[i:]
+		var encoded uint64
+
+		if canPack(remaining, 240, 0) {
+			encoded = 0
 			i += 240
 			statistics[0]++
 		} else if canPack(remaining, 120, 0) {
-			dst[j] = 1 << 60
+			encoded = 1 << 60
 			i += 120
 			statistics[1]++
 		} else if canPack(remaining, 60, 1) {
-			dst[j] = pack60(src[i : i+60])
+			encoded = pack60(src[i : i+60])
 			i += 60
 			statistics[2]++
 		} else if canPack(remaining, 30, 2) {
-			dst[j] = pack30(src[i : i+30])
+			encoded = pack30(src[i : i+30])
 			i += 30
 			statistics[3]++
 		} else if canPack(remaining, 20, 3) {
-			dst[j] = pack20(src[i : i+20])
+			encoded = pack20(src[i : i+20])
 			i += 20
 			statistics[4]++
 		} else if canPack(remaining, 15, 4) {
-			dst[j] = pack15(src[i : i+15])
+			encoded = pack15(src[i : i+15])
 			i += 15
 			statistics[5]++
 		} else if canPack(remaining, 12, 5) {
-			dst[j] = pack12(src[i : i+12])
+			encoded = pack12(src[i : i+12])
 			i += 12
 			statistics[6]++
 		} else if canPack(remaining, 10, 6) {
-			dst[j] = pack10(src[i : i+10])
+			encoded = pack10(src[i : i+10])
 			i += 10
 			statistics[7]++
 		} else if canPack(remaining, 8, 7) {
-			dst[j] = pack8(src[i : i+8])
+			encoded = pack8(src[i : i+8])
 			i += 8
 			statistics[8]++
 		} else if canPack(remaining, 7, 8) {
-			dst[j] = pack7(src[i : i+7])
+			encoded = pack7(src[i : i+7])
 			i += 7
 			statistics[9]++
 		} else if canPack(remaining, 6, 10) {
-			dst[j] = pack6(src[i : i+6])
+			encoded = pack6(src[i : i+6])
 			i += 6
 			statistics[10]++
 		} else if canPack(remaining, 5, 12) {
-			dst[j] = pack5(src[i : i+5])
+			encoded = pack5(src[i : i+5])
 			i += 5
 			statistics[11]++
 		} else if canPack(remaining, 4, 15) {
-			dst[j] = pack4(src[i : i+4])
+			encoded = pack4(src[i : i+4])
 			i += 4
 			statistics[12]++
 		} else if canPack(remaining, 3, 20) {
-			dst[j] = pack3(src[i : i+3])
+			encoded = pack3(src[i : i+3])
 			i += 3
 			statistics[13]++
 		} else if canPack(remaining, 2, 30) {
-			dst[j] = pack2(src[i : i+2])
+			encoded = pack2(src[i : i+2])
 			i += 2
 			statistics[14]++
 		} else if canPack(remaining, 1, 60) {
-			dst[j] = pack1(src[i : i+1])
+			encoded = pack1(src[i : i+1])
 			i += 1
 			statistics[15]++
 		} else {
 			return nil, fmt.Errorf("value out of bounds"), statistics
 		}
-		j += 1
+		binary.BigEndian.PutUint64(b[:], encoded)
+		dst = append(dst, b[:]...)
 	}
-	return dst[:j], nil, statistics
+	return dst, nil, statistics
 }
 
 func Decode(dst *[240]uint64, v uint64) (n int, err error) {
@@ -451,9 +527,15 @@ func Decode(dst *[240]uint64, v uint64) (n int, err error) {
 
 // Decode writes the uncompressed values from src to dst.  It returns the number
 // of values written or an error.
-func DecodeAll(dst, src []uint64) (value int, err error) {
+func DecodeAll(dst []uint64, src []byte) (value int, err error) {
 	j := 0
-	for _, v := range src {
+	for len(src) > 0 {
+		if len(src) < 8 {
+			return 0, fmt.Errorf("invalid byte slice length %d", len(src))
+		}
+		v := binary.BigEndian.Uint64(src)
+		src = src[8:]
+
 		sel := v >> 60
 		if sel >= 16 {
 			return 0, fmt.Errorf("invalid selector value: %b", sel)

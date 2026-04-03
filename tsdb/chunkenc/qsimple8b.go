@@ -2,6 +2,8 @@ package chunkenc
 
 import (
 	"encoding/binary"
+	"math"
+	"sort"
 
 	"github.com/prometheus/prometheus/model/histogram"
 )
@@ -10,6 +12,10 @@ type CompressType uint8
 
 const (
 	Simplebits CompressType = iota
+	Auto
+	BitPacking
+	Varint
+	PFor
 	QSimple8b
 	Huffman
 	SZ3
@@ -18,17 +24,11 @@ const (
 	None
 )
 
-// Estimated compressed byte size of single float64 value for different compression methods.
-const (
-	Estimated_SZ3     float64 = 1
-	Estimated_Machete float64 = 1
-	Estimated_MOST    float64 = 1
-)
-
-var DefaultCtype CompressType = QSimple8b
+var DefaultCtype CompressType = Auto
 var DefaultErrbound float64 = 0.01
 
-var TEST_SZ3_MinChunkSize int = 1000
+// SZ3 can not work on too small chunks.
+var SZ3_MinChunkSize int = 1000
 
 // 2-phase compactable lossy compression chunk.
 type CLChunk struct {
@@ -72,18 +72,17 @@ func (c *CLChunk) Appender() (Appender, error) {
 			b:   &bstream{stream: make([]byte, 0, 32), count: 0},
 			num: 0,
 		},
-		fdeltas: NewSimple8bEncoder(),
-		ctype:   DefaultCtype,
 
-		v:        0,
-		num:      0,
+		v:   0,
+		num: 0,
+
+		ctype:    DefaultCtype,
 		errbound: DefaultErrbound,
 
-		Huffman_buffer:    make([]int, 0),
-		Simplebits_buffer: make([]uint64, 0),
-
-		// TEST: only used when comparative testing
-		TEST_buffer: make([]float64, 0),
+		QSimple8b_encoder: NewSimple8bEncoder(),
+		Integer_buffer:    make([]int64, 0),
+		IntDelta_buffer:   make([]uint64, 0),
+		Float_buffer:      make([]float64, 0),
 	}
 	return a, nil
 }
@@ -106,44 +105,29 @@ func (c *CLChunk) Iterator(it Iterator) Iterator {
 	return c.iterator(it)
 }
 
-func (c *CLChunk) ToHuffmanEncoding() error {
-	num, ptr, errbound, CompressType := readCLMeta(c.b.stream)
-	if CompressType == Huffman {
-		return nil
-	}
-
-	iterator := c.Iterator(nil)
-	var quantizer []int
-	q0 := int64(0)
-	for iterator.Next() == ValFloat {
-		_, q := iterator.(*CLIterator).AtQuantizer()
-		quantizer = append(quantizer, int(q-q0))
-		q0 = q
-	}
-	b := HuffmanEncodeWithoutTimesMap(&quantizer, int(ptr))
-	copy(b.stream, c.b.stream[:ptr])
-	c.b = *b
-
-	writeCLMeta(num, ptr, errbound, Huffman, c.b.stream)
-	return nil
-}
-
 type CLAppender struct {
 	b          *bstream
 	timestamps *TimestampsDoD
-	fdeltas    *Simple8bEncoder
 
-	ctype CompressType
+	v   int64
+	num uint32
 
-	v        int64
-	num      uint32
+	ctype    CompressType
 	errbound float64
 
-	Huffman_buffer    []int
-	Simplebits_buffer []uint64
+	QSimple8b_encoder *Simple8bEncoder
 
-	// TEST: only used when comparative testing
-	TEST_buffer []float64
+	Integer_buffer  []int64
+	IntDelta_buffer []uint64
+	Float_buffer    []float64
+
+	TEST_timestampTotalSize int
+	TEST_floatTotalSize     int
+
+	// Statistics for choosing the best bit-packing scheme when CompressType is Simplebits.
+	maxBits      int
+	bitCounters  []BitCounter
+	bitSelectors []BitSelector
 }
 
 func (a *CLAppender) SetErrorBound(errbound float64) {
@@ -159,9 +143,9 @@ func (a *CLAppender) Append(t int64, v float64) {
 	a.timestamps.Append(t)
 	a.num += 1
 
-	// TEST: only used when comparative testing
-	if a.ctype != Huffman && a.ctype != QSimple8b && a.ctype != Simplebits {
-		a.TEST_buffer = append(a.TEST_buffer, v)
+	// When compressType is Machete, MOST or SZ3, we do not need to quantize the float value.
+	if a.ctype == Machete || a.ctype == MOST || a.ctype == SZ3 {
+		a.Float_buffer = append(a.Float_buffer, v)
 		return
 	}
 
@@ -178,8 +162,8 @@ func (a *CLAppender) Append(t int64, v float64) {
 	fdelta := f2i - a.v
 	a.v = f2i
 
-	if a.ctype == Huffman {
-		a.Huffman_buffer = append(a.Huffman_buffer, int(fdelta))
+	if a.ctype == PFor {
+		a.Integer_buffer = append(a.Integer_buffer, fdelta)
 		return
 	}
 
@@ -192,9 +176,9 @@ func (a *CLAppender) Append(t int64, v float64) {
 
 	// Step3: Bit-packing encode the delta.
 	if a.ctype == QSimple8b {
-		a.fdeltas.Write(uint64(fdelta))
-	} else if a.ctype == Simplebits {
-		a.Simplebits_buffer = append(a.Simplebits_buffer, uint64(fdelta))
+		a.QSimple8b_encoder.Write(uint64(fdelta))
+	} else if a.ctype == Auto || a.ctype == Simplebits || a.ctype == BitPacking || a.ctype == Varint || a.ctype == Huffman {
+		a.IntDelta_buffer = append(a.IntDelta_buffer, uint64(fdelta))
 	}
 }
 
@@ -206,6 +190,11 @@ func (a *CLAppender) AppendQuantizer(t int64, v int64) {
 	fdelta := v - a.v
 	a.v = v
 
+	if a.ctype == PFor {
+		a.Integer_buffer = append(a.Integer_buffer, fdelta)
+		return
+	}
+
 	// Zigzag encode the delta.
 	if fdelta >= 0 {
 		fdelta <<= 1
@@ -214,11 +203,14 @@ func (a *CLAppender) AppendQuantizer(t int64, v int64) {
 	}
 
 	// Step3: Bit-packing encode the delta.
-	a.fdeltas.Write(uint64(fdelta))
+	if a.ctype == QSimple8b {
+		a.QSimple8b_encoder.Write(uint64(fdelta))
+	} else if a.ctype == Auto || a.ctype == Simplebits || a.ctype == BitPacking || a.ctype == Varint || a.ctype == Huffman {
+		a.IntDelta_buffer = append(a.IntDelta_buffer, uint64(fdelta))
+	}
 
 	// Write the timestamp.
 	a.timestamps.Append(t)
-
 	a.num += 1
 }
 
@@ -227,19 +219,75 @@ func (a *CLAppender) NumSamples() int {
 }
 
 func (a *CLAppender) TimestampSize() int {
-	return len(a.timestamps.b.stream)
+	return a.TEST_timestampTotalSize
+}
+
+func (a *CLAppender) FloatSize() int {
+	return a.TEST_floatTotalSize
+}
+
+func (a *CLAppender) estimateHuffmanSize() int {
+	if len(a.IntDelta_buffer) == 0 {
+		return math.MaxInt
+	}
+
+	freqMap := make(map[uint64]int)
+	for _, v := range a.IntDelta_buffer {
+		freqMap[v]++
+	}
+
+	totalNum := float64(len(a.IntDelta_buffer))
+	var entropy float64
+
+	for _, count := range freqMap {
+		if count > 0 {
+			p := float64(count) / totalNum
+			entropy -= float64(count) * math.Log2(p)
+		}
+	}
+
+	keys := make([]uint64, 0)
+	for key := range freqMap {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+
+	// Metadata cost.
+	lastKey := uint64(0)
+	lastFreq := 0
+
+	// Simple8b metadata cost is 4bits / 64bits for both keys and freqs.
+	max1, max2 := 0, 0
+	for _, key := range keys {
+		max1 = max(max1, BitWidth(key-lastKey))
+		if freqMap[key] > lastFreq {
+			max2 = max(max2, BitWidth(uint64(freqMap[key]-lastFreq)))
+		} else {
+			max2 = max(max2, BitWidth(uint64(lastFreq-freqMap[key])))
+		}
+
+		lastKey = key
+		lastFreq = freqMap[key]
+	}
+	metaCost := (max1 + max2 + 1) * len(keys) / 32
+
+	return int(math.Ceil(entropy/8.0)) + metaCost
+}
+
+func (a *CLAppender) estimateSimplebitsSize() int {
+	var cost_bytes int
+	a.bitSelectors, cost_bytes = BitSelectors(a.bitCounters, Simplebits_MaxSegmentsNum, a.maxBits, len(a.IntDelta_buffer))
+	return cost_bytes
 }
 
 func (a *CLAppender) EstimatedSize() int {
 	switch a.ctype {
-	case SZ3:
-		return len(a.timestamps.b.stream) + int(float64(len(a.TEST_buffer))*Estimated_SZ3)
-	case Machete:
-		return len(a.timestamps.b.stream) + int(float64(len(a.TEST_buffer))*Estimated_Machete)
-	case MOST:
-		return len(a.timestamps.b.stream) + int(float64(len(a.TEST_buffer))*Estimated_MOST)
+	case SZ3, Machete, MOST:
+		return len(a.timestamps.b.stream) + len(a.Float_buffer)*1
+	case QSimple8b:
+		return len(a.timestamps.b.stream) + a.QSimple8b_encoder.EstimatedSize()
 	default:
-		return len(a.timestamps.b.stream) + a.fdeltas.EstimatedSize()
+		return len(a.timestamps.b.stream) + int(a.num)
 	}
 }
 
@@ -253,40 +301,85 @@ func (a *CLAppender) Compact() error {
 		ptr -= 1
 	}
 
-	if a.ctype == Huffman {
-		// when CompressType is Huffman
-		b := HuffmanEncodeWithoutTimesMap(&a.Huffman_buffer, int(ptr))
+	if a.ctype == QSimple8b {
+		compressed_data, err = a.QSimple8b_encoder.Bytes()
+		if err != nil {
+			return err
+		}
+	} else if a.ctype == Auto {
+		if a.bitCounters == nil {
+			a.bitCounters, a.maxBits = BitStatistics(a.IntDelta_buffer)
+		}
+
+		p8bits := float64(0)
+		for i := 1; i <= 8; i++ {
+			p8bits += a.bitCounters[i].Proportion
+		}
+		p12bits := p8bits
+		for i := 9; i <= 12; i++ {
+			p12bits += a.bitCounters[i].Proportion
+		}
+
+		// When the number of values that can be encoded in 8 bits is less than 80%
+		// or the number of values that need more than 12 bits is more than 5%,
+		// switch to Auto to choose a better compression method.
+		if p8bits > 0.8 && p12bits > 0.95 {
+			a.ctype = QSimple8b
+
+			compressed_data, err = EncodeAll(a.IntDelta_buffer)
+			if err != nil {
+				return err
+			}
+		} else {
+			huffman_cost := a.estimateHuffmanSize()
+			simplebits_cost := a.estimateSimplebitsSize()
+
+			if huffman_cost < simplebits_cost {
+				a.ctype = Huffman
+			} else {
+				a.ctype = Simplebits
+			}
+		}
+	}
+
+	switch a.ctype {
+	case Huffman:
+		b := HuffmanEncodeWithoutTimesMap(&a.IntDelta_buffer, int(ptr))
 		copy(b.stream[12:ptr], a.timestamps.b.stream[0:ptr-12])
 		a.b.stream = b.stream
 		a.b.count = b.count
 		writeCLMeta(a.num, uint32(ptr), a.errbound, a.ctype, a.b.stream)
+		// a.TEST_floatTotalSize = len(b.stream) - ptr
 		return nil
+	case Simplebits:
+		if a.bitCounters == nil {
+			a.bitCounters, a.maxBits = BitStatistics(a.IntDelta_buffer)
+		}
+		if a.bitSelectors == nil {
+			a.bitSelectors, _ = BitSelectors(a.bitCounters, Simplebits_MaxSegmentsNum, a.maxBits, len(a.IntDelta_buffer))
+		}
+		compressed_data = PackingAll(a.IntDelta_buffer, a.bitSelectors).bytes()
+	case BitPacking:
+		compressed_data = BitPackingAll(a.IntDelta_buffer).bytes()
+	case Varint:
+		compressed_data = VarintPackingAll(a.IntDelta_buffer).bytes()
+	case PFor:
+		compressed_data = PForPackingAll(a.Integer_buffer).bytes()
+	case SZ3:
+		var outSize uint64
+		if a.num < uint32(SZ3_MinChunkSize) {
+			compressed_data = SZ_Compress(1, a.Float_buffer, &outSize, 0, a.errbound, 0, 0, 0, 0, 0, 0, uint64(SZ3_MinChunkSize))
+		} else {
+			compressed_data = SZ_Compress(1, a.Float_buffer, &outSize, 0, a.errbound, 0, 0, 0, 0, 0, 0, uint64(a.num))
+		}
+	case MOST:
+		compressed_data = MOST_Compress(a.Float_buffer, a.errbound, 5)
+	case Machete:
+		compressed_data = Machete_Compress(a.Float_buffer, int64(len(a.Float_buffer)), a.errbound)
 	}
 
-	if a.ctype == QSimple8b {
-		compressed_data, err = a.fdeltas.Bytes()
-		if err != nil {
-			return err
-		}
-	} else if a.ctype == Simplebits {
-		bitCounts, maxBits := BitStatistics(a.Simplebits_buffer)
-		compressed_data = PackingAll(a.Simplebits_buffer, BitSelectors(bitCounts, Simplebits_MaxSegmentsNum, maxBits)).bytes()
-	} else {
-		// TEST: when comparative testing
-		var outSize uint64
-		switch a.ctype {
-		case SZ3:
-			if a.num < uint32(TEST_SZ3_MinChunkSize) {
-				compressed_data = SZ_Compress(1, a.TEST_buffer, &outSize, 0, a.errbound, 0, 0, 0, 0, 0, 0, uint64(TEST_SZ3_MinChunkSize))
-			} else {
-				compressed_data = SZ_Compress(1, a.TEST_buffer, &outSize, 0, a.errbound, 0, 0, 0, 0, 0, 0, uint64(a.num))
-			}
-		case MOST:
-			compressed_data = MOST_Compress(a.TEST_buffer, a.errbound, 5)
-		case Machete:
-			compressed_data = Machete_Compress(a.TEST_buffer, int64(len(a.TEST_buffer)), a.errbound)
-		}
-	}
+	// a.TEST_timestampTotalSize = len(a.timestamps.b.stream)
+	// a.TEST_floatTotalSize = len(compressed_data)
 
 	totalBytes := ptr + len(compressed_data)
 	if totalBytes > len(a.b.stream) {
@@ -309,11 +402,13 @@ func (a *CLAppender) AppendFloatHistogram(*FloatHistogramAppender, int64, *histo
 }
 
 type CLIterator struct {
-	tr      bstreamReader
-	fdeltas *Simple8bDecoder
-	entropy *HuffmanDecoder
+	tr                 bstreamReader
+	QSimple8b_decoder  *Simple8bDecoder
+	Huffman_decoder    *HuffmanDecoder
+	Simplebits_decoder *SimplebitsDecoder
+	BitPacking_decoder *BitPackingDecoder
 
-	// TEST: when comparative testing
+	// When compressType is Machete, MOST or SZ3.
 	decompressed_data []float64
 
 	numTotal uint32
@@ -333,14 +428,18 @@ func (it *CLIterator) Reset(b []byte) bool {
 	num, ptr, errbound, ctype := readCLMeta(b)
 
 	if ctype == QSimple8b {
-		it.fdeltas = NewSimple8bDecoder(b[ptr:])
+		it.QSimple8b_decoder = NewSimple8bDecoder(b[ptr:])
 	} else if ctype == Huffman {
-		it.entropy = NewHuffmanDecoder(b, ptr)
+		it.Huffman_decoder = NewHuffmanDecoder(b, ptr)
+	} else if ctype == Simplebits {
+		it.Simplebits_decoder = NewSimplebitsDecoder(b[ptr:])
+	} else if ctype == BitPacking {
+		it.BitPacking_decoder = NewBitPackingDecoder(b[ptr:], int(num))
 	} else {
 		switch ctype {
 		case SZ3:
-			if num < uint32(TEST_SZ3_MinChunkSize) {
-				it.decompressed_data = SZ_Decompress(1, b[ptr:], uint64(uint32(len(b))-ptr), 0, 0, 0, 0, uint64(TEST_SZ3_MinChunkSize))
+			if num < uint32(SZ3_MinChunkSize) {
+				it.decompressed_data = SZ_Decompress(1, b[ptr:], uint64(uint32(len(b))-ptr), 0, 0, 0, 0, uint64(SZ3_MinChunkSize))
 			} else {
 				it.decompressed_data = SZ_Decompress(1, b[ptr:], uint64(uint32(len(b))-ptr), 0, 0, 0, 0, uint64(num))
 			}
@@ -378,12 +477,33 @@ func (it *CLIterator) Next() ValueType {
 		return ValNone
 	}
 
+	var fdelta uint64
 	switch it.ctype {
 	case QSimple8b:
-		if !it.fdeltas.Next() {
+		if !it.QSimple8b_decoder.Next() {
 			return ValNone
 		}
-		fdelta := it.fdeltas.Read()
+		fdelta = it.QSimple8b_decoder.Read()
+	case Huffman:
+		if !it.Huffman_decoder.Next() {
+			return ValNone
+		}
+		fdelta = it.Huffman_decoder.Read()
+	case Simplebits:
+		if it.Simplebits_decoder.Next() != nil {
+			return ValNone
+		}
+		fdelta = it.Simplebits_decoder.Read()
+	case BitPacking:
+		if it.BitPacking_decoder.Next() {
+			return ValNone
+		}
+		fdelta = it.BitPacking_decoder.Read()
+	default:
+		it.val = it.decompressed_data[it.numRead]
+	}
+
+	if it.ctype == QSimple8b || it.ctype == Huffman || it.ctype == Simplebits || it.ctype == BitPacking || it.ctype == Auto {
 		if fdelta%2 == 0 {
 			it.val += it.errbound * float64(fdelta)
 			it.quantizer += int64(fdelta) / 2
@@ -391,14 +511,6 @@ func (it *CLIterator) Next() ValueType {
 			it.val -= it.errbound * float64(fdelta+1)
 			it.quantizer -= int64(fdelta+1) / 2
 		}
-	case Huffman:
-		if !it.entropy.Next() {
-			return ValNone
-		}
-		it.quantizer = it.entropy.Read()
-		it.val = 2 * it.errbound * float64(it.quantizer)
-	default:
-		it.val = it.decompressed_data[it.numRead]
 	}
 
 	it.numRead += 1
@@ -533,7 +645,7 @@ func readCLMeta(b []byte) (uint32, uint32, float64, CompressType) {
 	errbound := uint32(b[8]&0x0f)<<24 + uint32(b[9])<<16 + uint32(b[10])<<8 + uint32(b[11])
 	// CompressType indicates the type of Encoding method used.
 	ctype := (b[8] & 0xf0) >> 4
-	return num, ptr, float64(0.00001) * float64(errbound), CompressType(ctype)
+	return num, ptr, float64(0.000001) * float64(errbound), CompressType(ctype)
 }
 
 func writeCLMeta(num uint32, ptr uint32, errbound float64, ctype CompressType, b []byte) {
@@ -545,7 +657,7 @@ func writeCLMeta(num uint32, ptr uint32, errbound float64, ctype CompressType, b
 		b[i+4] = byte(ptr >> (24 - 8*i))
 	}
 	for i := 0; i < 4; i += 1 {
-		b[i+8] = byte(uint32(errbound*100000) >> (24 - 8*i))
+		b[i+8] = byte(uint32(errbound*1000000) >> (24 - 8*i))
 	}
 	b[8] |= byte(ctype << 4)
 }

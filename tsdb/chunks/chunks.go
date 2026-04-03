@@ -143,7 +143,7 @@ func ChunkFromSamples(s []Sample) (Meta, error) {
 
 // ChunkFromSamplesGeneric requires all samples to have the same type.
 func ChunkFromSamplesGeneric(s Samples) (Meta, error) {
-	emptyChunk := Meta{Chunk: chunkenc.NewXORChunk()}
+	emptyChunk := Meta{Chunk: chunkenc.NewCLChunk()}
 	mint, maxt := int64(0), int64(0)
 
 	if s.Len() > 0 {

@@ -299,7 +299,7 @@ func (c *seriesSetToChunkSet) Next() bool {
 }
 
 func (c *seriesSetToChunkSet) At() ChunkSeries {
-	return NewSeriesToChunkEncoder(c.SeriesSet.At())
+	return NewSeriesToChunkEncoder(c.SeriesSet.At(), DefaultSeriesToChunkEncoderSplit)
 }
 
 func (c *seriesSetToChunkSet) Err() error {
@@ -308,13 +308,15 @@ func (c *seriesSetToChunkSet) Err() error {
 
 type seriesToChunkEncoder struct {
 	Series
+
+	seriesToChunkEncoderSplit int
 }
 
-const seriesToChunkEncoderSplit = 120
+const DefaultSeriesToChunkEncoderSplit = 1000
 
-// NewSeriesToChunkEncoder encodes samples to chunks with 120 samples limit.
-func NewSeriesToChunkEncoder(series Series) ChunkSeries {
-	return &seriesToChunkEncoder{series}
+// NewSeriesToChunkEncoder encodes samples to chunks with @seriesToChunkEncoderSplit samples limit.
+func NewSeriesToChunkEncoder(series Series, seriesToChunkEncoderSplit int) ChunkSeries {
+	return &seriesToChunkEncoder{series, seriesToChunkEncoderSplit}
 }
 
 func (s *seriesToChunkEncoder) Iterator(it chunks.Iterator) chunks.Iterator {
@@ -336,9 +338,15 @@ func (s *seriesToChunkEncoder) Iterator(it chunks.Iterator) chunks.Iterator {
 	i := 0
 	seriesIter := s.Series.Iterator(nil)
 	lastType := chunkenc.ValNone
-	for typ := seriesIter.Next(); typ != chunkenc.ValNone; typ = seriesIter.Next() {
-		if typ != lastType || i >= seriesToChunkEncoderSplit {
+
+	typ := seriesIter.Next()
+
+	for ; typ != chunkenc.ValNone; typ = seriesIter.Next() {
+		if typ != lastType || i >= s.seriesToChunkEncoderSplit {
 			// Create a new chunk if the sample type changed or too many samples in the current one.
+			if chk != nil && chk.Encoding() == chunkenc.EncCL {
+				app.(*chunkenc.CLAppender).Compact()
+			}
 			chks = appendChunk(chks, mint, maxt, chk)
 			chk, err = chunkenc.NewEmptyChunk(typ.ChunkEncoding())
 			if err != nil {
@@ -355,15 +363,26 @@ func (s *seriesToChunkEncoder) Iterator(it chunks.Iterator) chunks.Iterator {
 		lastType = typ
 
 		var (
-			t  int64
-			v  float64
-			h  *histogram.Histogram
-			fh *histogram.FloatHistogram
+			t     int64
+			v_i64 int64
+			v_f64 float64
+			h     *histogram.Histogram
+			fh    *histogram.FloatHistogram
 		)
 		switch typ {
 		case chunkenc.ValFloat:
-			t, v = seriesIter.At()
-			app.Append(t, v)
+			if seriesIter.(*chainSampleIterator).CompressType() == chunkenc.Auto ||
+				seriesIter.(*chainSampleIterator).CompressType() == chunkenc.BitPacking ||
+				seriesIter.(*chainSampleIterator).CompressType() == chunkenc.Huffman ||
+				seriesIter.(*chainSampleIterator).CompressType() == chunkenc.QSimple8b ||
+				seriesIter.(*chainSampleIterator).CompressType() == chunkenc.Simplebits {
+				t, v_i64 = seriesIter.(*chainSampleIterator).AtQuantizer()
+				app.(*chunkenc.CLAppender).AppendQuantizer(t, v_i64)
+			} else {
+				// When CompressType is Machete/Most/SZ.
+				t, v_f64 = seriesIter.At()
+				app.(*chunkenc.CLAppender).Append(t, v_f64)
+			}
 		case chunkenc.ValHistogram:
 			t, h = seriesIter.AtHistogram(nil)
 			newChk, recoded, app, err = app.AppendHistogram(nil, t, h, false)
@@ -408,6 +427,9 @@ func (s *seriesToChunkEncoder) Iterator(it chunks.Iterator) chunks.Iterator {
 		return errChunksIterator{err: err}
 	}
 
+	if chk != nil && chk.Encoding() == chunkenc.EncCL {
+		app.(*chunkenc.CLAppender).Compact()
+	}
 	chks = appendChunk(chks, mint, maxt, chk)
 
 	if existing {

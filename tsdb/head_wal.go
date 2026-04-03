@@ -987,7 +987,7 @@ func (wp *wblSubsetProcessor) processWBLSamples(h *Head) (unknownRefs, unknownHi
 				unknownRefs++
 				continue
 			}
-			ok, chunkCreated, _ := ms.insert(s.T, s.V, nil, nil, h.chunkDiskMapper, oooCapMax, h.logger)
+			ok, chunkCreated, _ := ms.insert(s.T, s.V, nil, nil, h.chunkDiskMapper, oooCapMax, h.logger, h.opts.ErrorBound)
 			if chunkCreated {
 				h.metrics.chunksCreated.Inc()
 				h.metrics.chunks.Inc()
@@ -1014,9 +1014,9 @@ func (wp *wblSubsetProcessor) processWBLSamples(h *Head) (unknownRefs, unknownHi
 			var chunkCreated bool
 			var ok bool
 			if s.h != nil {
-				ok, chunkCreated, _ = ms.insert(s.t, 0, s.h, nil, h.chunkDiskMapper, oooCapMax, h.logger)
+				ok, chunkCreated, _ = ms.insert(s.t, 0, s.h, nil, h.chunkDiskMapper, oooCapMax, h.logger, h.opts.ErrorBound)
 			} else {
-				ok, chunkCreated, _ = ms.insert(s.t, 0, nil, s.fh, h.chunkDiskMapper, oooCapMax, h.logger)
+				ok, chunkCreated, _ = ms.insert(s.t, 0, nil, s.fh, h.chunkDiskMapper, oooCapMax, h.logger, h.opts.ErrorBound)
 			}
 			if chunkCreated {
 				h.metrics.chunksCreated.Inc()
@@ -1085,6 +1085,13 @@ func (s *memSeries) encodeToSnapshotRecord(b []byte) []byte {
 			}
 			buf.PutBE64int64(0)
 			buf.PutBEFloat64(s.lastValue)
+		case chunkenc.EncCL:
+			for i := 0; i < 3; i++ {
+				buf.PutBE64int64(0)
+				buf.PutBEFloat64(0)
+			}
+			buf.PutBE64int64(0)
+			buf.PutBEFloat64(s.lastValue)
 		case chunkenc.EncHistogram:
 			record.EncodeHistogram(&buf, s.lastHistogramValue)
 		default: // chunkenc.FloatHistogram.
@@ -1130,6 +1137,14 @@ func decodeSeriesFromChunkSnapshot(d *record.Decoder, b []byte) (csr chunkSnapsh
 	csr.mc.chunk = chk
 
 	switch enc {
+	case chunkenc.EncCL:
+		// Backwards-compatibility for old sampleBuf which had last 4 samples.
+		for i := 0; i < 3; i++ {
+			_ = dec.Be64int64()
+			_ = dec.Be64Float64()
+		}
+		_ = dec.Be64int64()
+		csr.lastValue = dec.Be64Float64()
 	case chunkenc.EncXOR:
 		// Backwards-compatibility for old sampleBuf which had last 4 samples.
 		for i := 0; i < 3; i++ {

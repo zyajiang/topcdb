@@ -596,7 +596,7 @@ func testHistogramsSeriesToChunks(t *testing.T, test histogramTest) {
 		}
 	}
 	series := NewListSeries(lbs, copiedSamples)
-	encoder := NewSeriesToChunkEncoder(series)
+	encoder := NewSeriesToChunkEncoder(series, DefaultSeriesToChunkEncoderSplit)
 	require.EqualValues(t, lbs, encoder.Labels())
 
 	chks, err := ExpandChunks(encoder.Iterator(nil))

@@ -854,6 +854,15 @@ func (c DefaultBlockPopulator) PopulateBlock(ctx context.Context, metrics *Compa
 		}
 		s := set.At()
 		chksIter = s.Iterator(chksIter)
+
+		if _, ok := chksIter.(*storage.CompactChunkIterator); ok {
+			if meta.Compaction.Level >= 2 {
+				chksIter.(*storage.CompactChunkIterator).SetSeriesToChunkEncoderSplit((meta.Compaction.Level - 1) * 3 * storage.DefaultSeriesToChunkEncoderSplit)
+				// } else if meta.Compaction.Level > 2 {
+				// 	chksIter.(*storage.CompactChunkIterator).SetSeriesToChunkEncoderSplit(-1)
+			}
+		}
+
 		chks = chks[:0]
 		for chksIter.Next() {
 			// We are not iterating in a streaming way over chunks as

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 
 	"github.com/oklog/ulid"
@@ -892,19 +893,35 @@ func (p *populateWithDelChunkSeriesIterator) populateCurrForSingleChunk() bool {
 			}
 		}
 	case chunkenc.ValFloat:
-		newChunk = chunkenc.NewXORChunk()
+		newChunk = chunkenc.NewCLChunk()
 		if app, err = newChunk.Appender(); err != nil {
 			break
 		}
+		getValue := reflect.ValueOf(p.currDelIter.(*DeletedIterator).Iter)
+		mCtype := getValue.MethodByName("CompressType")
+		re := mCtype.Call([]reflect.Value{})
+		CompressType := re[0].Interface().(chunkenc.CompressType)
 		for vt := valueType; vt != chunkenc.ValNone; vt = p.currDelIter.Next() {
 			if vt != chunkenc.ValFloat {
 				err = fmt.Errorf("found value type %v in float chunk", vt)
 				break
 			}
-			var v float64
-			t, v = p.currDelIter.At()
-			app.Append(t, v)
+
+			if CompressType == chunkenc.QSimple8b ||
+				CompressType == chunkenc.BitPacking ||
+				CompressType == chunkenc.Huffman {
+				var v int64
+				mAt := getValue.MethodByName("AtQuantizer")
+				rep := mAt.Call([]reflect.Value{})
+				t, v = rep[0].Interface().(int64), rep[1].Interface().(int64)
+				app.(*chunkenc.CLAppender).AppendQuantizer(t, v)
+			} else {
+				var v float64
+				t, v = p.currDelIter.At()
+				app.Append(t, v)
+			}
 		}
+		app.(*chunkenc.CLAppender).Compact()
 	case chunkenc.ValFloatHistogram:
 		newChunk = chunkenc.NewFloatHistogramChunk()
 		if app, err = newChunk.Appender(); err != nil {
@@ -981,6 +998,9 @@ func (p *populateWithDelChunkSeriesIterator) populateChunksFromIterable() bool {
 		// ValNone != ValFloat | ValHistogram | ValFloatHistogram.
 		if currentValueType != prevValueType {
 			if prevValueType != chunkenc.ValNone {
+				if prevValueType == chunkenc.ValFloat {
+					app.(*chunkenc.CLAppender).Compact()
+				}
 				p.chunksFromIterable = append(p.chunksFromIterable, chunks.Meta{Chunk: currentChunk, MinTime: cmint, MaxTime: cmaxt})
 			}
 			cmint = p.currDelIter.AtT()
@@ -995,9 +1015,23 @@ func (p *populateWithDelChunkSeriesIterator) populateChunksFromIterable() bool {
 		switch currentValueType {
 		case chunkenc.ValFloat:
 			{
-				var v float64
-				t, v = p.currDelIter.At()
-				app.Append(t, v)
+				getValue := reflect.ValueOf(p.currDelIter.(*DeletedIterator).Iter)
+				mCtype := getValue.MethodByName("CompressType")
+				re := mCtype.Call([]reflect.Value{})
+				CompressType := re[0].Interface().(chunkenc.CompressType)
+				if CompressType == chunkenc.QSimple8b ||
+					CompressType == chunkenc.BitPacking ||
+					CompressType == chunkenc.Huffman {
+					var v int64
+					mAt := getValue.MethodByName("AtQuantizer")
+					rep := mAt.Call([]reflect.Value{})
+					t, v = rep[0].Interface().(int64), rep[1].Interface().(int64)
+					app.(*chunkenc.CLAppender).AppendQuantizer(t, v)
+				} else {
+					var v float64
+					t, v = p.currDelIter.At()
+					app.Append(t, v)
+				}
 			}
 		case chunkenc.ValHistogram:
 			{
@@ -1043,6 +1077,9 @@ func (p *populateWithDelChunkSeriesIterator) populateChunksFromIterable() bool {
 	}
 
 	if prevValueType != chunkenc.ValNone {
+		if prevValueType == chunkenc.ValFloat {
+			app.(*chunkenc.CLAppender).Compact()
+		}
 		p.chunksFromIterable = append(p.chunksFromIterable, chunks.Meta{Chunk: currentChunk, MinTime: cmint, MaxTime: cmaxt})
 	}
 
@@ -1251,7 +1288,7 @@ type nopChunkReader struct {
 
 func newNopChunkReader() ChunkReader {
 	return nopChunkReader{
-		emptyChunk: chunkenc.NewXORChunk(),
+		emptyChunk: chunkenc.NewCLChunk(),
 	}
 }
 

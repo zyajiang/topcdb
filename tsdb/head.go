@@ -181,6 +181,8 @@ type HeadOptions struct {
 
 	// EnableSharding enables ShardedPostings() support in the Head.
 	EnableSharding bool
+
+	ErrorBound float64
 }
 
 const (
@@ -202,6 +204,8 @@ func DefaultHeadOptions() *HeadOptions {
 		SeriesCallback:       &noopSeriesLifecycleCallback{},
 		IsolationDisabled:    defaultIsolationDisabled,
 		WALReplayConcurrency: defaultWALReplayConcurrency,
+
+		ErrorBound: 0,
 	}
 	ho.OutOfOrderCapMax.Store(DefaultOutOfOrderCapMax)
 	return ho

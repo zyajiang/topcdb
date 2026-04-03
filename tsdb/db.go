@@ -92,6 +92,7 @@ func DefaultOptions() *Options {
 		CompactionDelayMaxPercent:   DefaultCompactionDelayMaxPercent,
 		CompactionDelay:             time.Duration(0),
 		PostingsDecoderFactory:      DefaultPostingsDecoderFactory,
+		ErrorBound:                  0,
 	}
 }
 
@@ -224,6 +225,8 @@ type Options struct {
 	// PostingsDecoderFactory allows users to customize postings decoders based on BlockMeta.
 	// By default, DefaultPostingsDecoderFactory will be used to create raw posting decoder.
 	PostingsDecoderFactory PostingsDecoderFactory
+
+	ErrorBound float64
 }
 
 type NewCompactorFunc func(ctx context.Context, r prometheus.Registerer, l *slog.Logger, ranges []int64, pool chunkenc.Pool, opts *Options) (Compactor, error)
@@ -814,6 +817,9 @@ func validateOpts(opts *Options, rngs []int64) (*Options, []int64) {
 	if opts.OutOfOrderTimeWindow < 0 {
 		opts.OutOfOrderTimeWindow = 0
 	}
+	if opts.ErrorBound < 0 {
+		opts.ErrorBound = 0
+	}
 
 	if len(rngs) == 0 {
 		// Start with smallest block duration and create exponential buckets until the exceed the
@@ -970,6 +976,8 @@ func open(dir string, l *slog.Logger, r prometheus.Registerer, opts *Options, rn
 	headOpts.OutOfOrderTimeWindow.Store(opts.OutOfOrderTimeWindow)
 	headOpts.OutOfOrderCapMax.Store(opts.OutOfOrderCapMax)
 	headOpts.EnableSharding = opts.EnableSharding
+	headOpts.ErrorBound = opts.ErrorBound
+	// chunkenc.DefaultErrbound = opts.ErrorBound
 	if opts.WALReplayConcurrency > 0 {
 		headOpts.WALReplayConcurrency = opts.WALReplayConcurrency
 	}

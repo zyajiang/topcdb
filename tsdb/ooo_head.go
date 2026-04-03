@@ -26,10 +26,20 @@ import (
 // Perhaps we can be more efficient later.
 type OOOChunk struct {
 	samples []sample
+
+	errbound float64
 }
 
 func NewOOOChunk() *OOOChunk {
 	return &OOOChunk{samples: make([]sample, 0, 4)}
+}
+
+func NewOOOChunkWithErrorBound(errbound float64) *OOOChunk {
+	return &OOOChunk{samples: make([]sample, 0, 4), errbound: errbound}
+}
+
+func (o *OOOChunk) SetErrorBound(errbound float64) {
+	o.errbound = errbound
 }
 
 // Insert inserts the sample such that order is maintained.
@@ -93,7 +103,7 @@ func (o *OOOChunk) ToEncodedChunks(mint, maxt int64) (chks []memChunk, err error
 		if s.t > maxt {
 			break
 		}
-		encoding := chunkenc.EncXOR
+		encoding := chunkenc.EncCL
 		if s.h != nil {
 			encoding = chunkenc.EncHistogram
 		} else if s.fh != nil {
@@ -105,10 +115,16 @@ func (o *OOOChunk) ToEncodedChunks(mint, maxt int64) (chks []memChunk, err error
 
 		if encoding != prevEncoding { // For the first sample, this will always be true as EncNone != EncXOR | EncHistogram | EncFloatHistogram
 			if prevEncoding != chunkenc.EncNone {
+				if prevEncoding == chunkenc.EncCL {
+					app.(*chunkenc.CLAppender).Compact()
+				}
+
 				chks = append(chks, memChunk{chunk, cmint, cmaxt, nil})
 			}
 			cmint = s.t
 			switch encoding {
+			case chunkenc.EncCL:
+				chunk = chunkenc.NewCLChunk()
 			case chunkenc.EncXOR:
 				chunk = chunkenc.NewXORChunk()
 			case chunkenc.EncHistogram:
@@ -119,11 +135,16 @@ func (o *OOOChunk) ToEncodedChunks(mint, maxt int64) (chks []memChunk, err error
 				chunk = chunkenc.NewXORChunk()
 			}
 			app, err = chunk.Appender()
+			if encoding == chunkenc.EncCL {
+				app.(*chunkenc.CLAppender).SetCompressType(chunkenc.BitPacking)
+			}
 			if err != nil {
 				return
 			}
 		}
 		switch encoding {
+		case chunkenc.EncCL:
+			app.Append(s.t, s.f)
 		case chunkenc.EncXOR:
 			app.Append(s.t, s.f)
 		case chunkenc.EncHistogram:
@@ -161,6 +182,10 @@ func (o *OOOChunk) ToEncodedChunks(mint, maxt int64) (chks []memChunk, err error
 		prevEncoding = encoding
 	}
 	if prevEncoding != chunkenc.EncNone {
+		if prevEncoding == chunkenc.EncCL {
+			app.(*chunkenc.CLAppender).Compact()
+		}
+
 		chks = append(chks, memChunk{chunk, cmint, cmaxt, nil})
 	}
 	return chks, nil

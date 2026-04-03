@@ -565,6 +565,33 @@ func (c *chainSampleIterator) At() (t int64, v float64) {
 	return c.curr.At()
 }
 
+func (c *chainSampleIterator) AtQuantizer() (t int64, v int64) {
+	if c.curr == nil {
+		panic("chainSampleIterator.AtQuantizer called before first .Next or after .Next returned false.")
+	}
+	return c.curr.(*chunkenc.CLIterator).AtQuantizer()
+}
+
+func (c *chainSampleIterator) CompressType() chunkenc.CompressType {
+	if c.curr == nil {
+		panic("chainSampleIterator.CompressType called before first .Next or after .Next returned false.")
+	}
+	if _, ok := c.curr.(*chunkenc.CLIterator); ok {
+		return c.curr.(*chunkenc.CLIterator).CompressType()
+	}
+	return chunkenc.None
+}
+
+func (c *chainSampleIterator) ErrorBound() float64 {
+	if c.curr == nil {
+		panic("chainSampleIterator.Errbound called before first .Next or after .Next returned false.")
+	}
+	if _, ok := c.curr.(*chunkenc.CLIterator); ok {
+		return c.curr.(*chunkenc.CLIterator).ErrorBound()
+	}
+	return -1
+}
+
 func (c *chainSampleIterator) AtHistogram(h *histogram.Histogram) (int64, *histogram.Histogram) {
 	if c.curr == nil {
 		panic("chainSampleIterator.AtHistogram called before first .Next or after .Next returned false.")
@@ -733,7 +760,7 @@ func NewCompactingChunkSeriesMerger(mergeFunc VerticalSeriesMergeFunc) VerticalC
 				for _, s := range series {
 					iterators = append(iterators, s.Iterator(nil))
 				}
-				return &compactChunkIterator{
+				return &CompactChunkIterator{
 					mergeFunc: mergeFunc,
 					iterators: iterators,
 				}
@@ -745,7 +772,7 @@ func NewCompactingChunkSeriesMerger(mergeFunc VerticalSeriesMergeFunc) VerticalC
 // compactChunkIterator is responsible to compact chunks from different iterators of the same time series into single chainSeries.
 // If time-overlapping chunks are found, they are encoded and passed to series merge and encoded again into one bigger chunk.
 // TODO(bwplotka): Currently merge will compact overlapping chunks with bigger chunk, without limit. Split it: https://github.com/prometheus/tsdb/issues/670
-type compactChunkIterator struct {
+type CompactChunkIterator struct {
 	mergeFunc VerticalSeriesMergeFunc
 	iterators []chunks.Iterator
 
@@ -753,13 +780,46 @@ type compactChunkIterator struct {
 
 	err  error
 	curr chunks.Meta
+
+	seriesToChunkEncoderSplit int
+	mergeItr                  chunks.Iterator
 }
 
-func (c *compactChunkIterator) At() chunks.Meta {
+func (c *CompactChunkIterator) SetSeriesToChunkEncoderSplit(seriesToChunkEncoderSplit int) {
+	c.seriesToChunkEncoderSplit = seriesToChunkEncoderSplit
+
+	if c.seriesToChunkEncoderSplit > DefaultSeriesToChunkEncoderSplit {
+		var merging []Series
+
+		for _, iter := range c.iterators {
+			for iter.Next() {
+				merging = append(merging, newChunkToSeriesDecoder(labels.EmptyLabels(), iter.At()))
+			}
+		}
+
+		chks := NewSeriesToChunkEncoder(c.mergeFunc(merging...), c.seriesToChunkEncoderSplit)
+		c.mergeItr = chks.Iterator(nil)
+	}
+}
+
+func (c *CompactChunkIterator) At() chunks.Meta {
 	return c.curr
 }
 
-func (c *compactChunkIterator) Next() bool {
+func (c *CompactChunkIterator) Next() bool {
+	// When the chunk size increases, merging is required.
+	chunkEncoderSplit := DefaultSeriesToChunkEncoderSplit
+	if c.seriesToChunkEncoderSplit > DefaultSeriesToChunkEncoderSplit {
+		if !c.mergeItr.Next() {
+			c.err = c.mergeItr.Err()
+			return false
+		}
+		c.curr = c.mergeItr.At()
+		return true
+	} else if c.seriesToChunkEncoderSplit < 0 {
+		chunkEncoderSplit = 1000
+	}
+
 	if c.h == nil {
 		for _, iter := range c.iterators {
 			if iter.Next() {
@@ -813,7 +873,7 @@ func (c *compactChunkIterator) Next() bool {
 	}
 
 	// Add last as it's not yet included in overlap. We operate on same series, so labels does not matter here.
-	iter = NewSeriesToChunkEncoder(c.mergeFunc(append(overlapping, newChunkToSeriesDecoder(labels.EmptyLabels(), c.curr))...)).Iterator(nil)
+	iter = NewSeriesToChunkEncoder(c.mergeFunc(append(overlapping, newChunkToSeriesDecoder(labels.EmptyLabels(), c.curr))...), chunkEncoderSplit).Iterator(nil)
 	if !iter.Next() {
 		if c.err = iter.Err(); c.err != nil {
 			return false
@@ -827,7 +887,7 @@ func (c *compactChunkIterator) Next() bool {
 	return true
 }
 
-func (c *compactChunkIterator) Err() error {
+func (c *CompactChunkIterator) Err() error {
 	errs := tsdb_errors.NewMulti()
 	for _, iter := range c.iterators {
 		errs.Add(iter.Err())

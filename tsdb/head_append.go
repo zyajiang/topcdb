@@ -1148,7 +1148,7 @@ func (a *headAppender) commitSamples(acc *appenderCommitContext) {
 			// Sample is OOO and OOO handling is enabled
 			// and the delta is within the OOO tolerance.
 			var mmapRefs []chunks.ChunkDiskMapperRef
-			ok, chunkCreated, mmapRefs = series.insert(s.T, s.V, nil, nil, a.head.chunkDiskMapper, acc.oooCapMax, a.head.logger)
+			ok, chunkCreated, mmapRefs = series.insert(s.T, s.V, nil, nil, a.head.chunkDiskMapper, acc.oooCapMax, a.head.logger, acc.appendChunkOpts.ErrorBound)
 			if chunkCreated {
 				r, ok := acc.oooMmapMarkers[series.ref]
 				if !ok || r != nil {
@@ -1236,7 +1236,7 @@ func (a *headAppender) commitHistograms(acc *appenderCommitContext) {
 			// Sample is OOO and OOO handling is enabled
 			// and the delta is within the OOO tolerance.
 			var mmapRefs []chunks.ChunkDiskMapperRef
-			ok, chunkCreated, mmapRefs = series.insert(s.T, 0, s.H, nil, a.head.chunkDiskMapper, acc.oooCapMax, a.head.logger)
+			ok, chunkCreated, mmapRefs = series.insert(s.T, 0, s.H, nil, a.head.chunkDiskMapper, acc.oooCapMax, a.head.logger, acc.appendChunkOpts.ErrorBound)
 			if chunkCreated {
 				r, ok := acc.oooMmapMarkers[series.ref]
 				if !ok || r != nil {
@@ -1324,7 +1324,7 @@ func (a *headAppender) commitFloatHistograms(acc *appenderCommitContext) {
 			// Sample is OOO and OOO handling is enabled
 			// and the delta is within the OOO tolerance.
 			var mmapRefs []chunks.ChunkDiskMapperRef
-			ok, chunkCreated, mmapRefs = series.insert(s.T, 0, nil, s.FH, a.head.chunkDiskMapper, acc.oooCapMax, a.head.logger)
+			ok, chunkCreated, mmapRefs = series.insert(s.T, 0, nil, s.FH, a.head.chunkDiskMapper, acc.oooCapMax, a.head.logger, acc.appendChunkOpts.ErrorBound)
 			if chunkCreated {
 				r, ok := acc.oooMmapMarkers[series.ref]
 				if !ok || r != nil {
@@ -1445,6 +1445,8 @@ func (a *headAppender) Commit() (err error) {
 			chunkDiskMapper: a.head.chunkDiskMapper,
 			chunkRange:      a.head.chunkRange.Load(),
 			samplesPerChunk: a.head.opts.SamplesPerChunk,
+
+			ErrorBound: a.head.opts.ErrorBound,
 		},
 	}
 
@@ -1484,14 +1486,14 @@ func (a *headAppender) Commit() (err error) {
 }
 
 // insert is like append, except it inserts. Used for OOO samples.
-func (s *memSeries) insert(t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, chunkDiskMapper *chunks.ChunkDiskMapper, oooCapMax int64, logger *slog.Logger) (inserted, chunkCreated bool, mmapRefs []chunks.ChunkDiskMapperRef) {
+func (s *memSeries) insert(t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, chunkDiskMapper *chunks.ChunkDiskMapper, oooCapMax int64, logger *slog.Logger, errbound float64) (inserted, chunkCreated bool, mmapRefs []chunks.ChunkDiskMapperRef) {
 	if s.ooo == nil {
 		s.ooo = &memSeriesOOOFields{}
 	}
 	c := s.ooo.oooHeadChunk
 	if c == nil || c.chunk.NumSamples() == int(oooCapMax) {
 		// Note: If no new samples come in then we rely on compaction to clean up stale in-memory OOO chunks.
-		c, mmapRefs = s.cutNewOOOHeadChunk(t, chunkDiskMapper, logger)
+		c, mmapRefs = s.cutNewOOOHeadChunk(t, chunkDiskMapper, logger, errbound)
 		chunkCreated = true
 	}
 
@@ -1512,6 +1514,8 @@ type chunkOpts struct {
 	chunkDiskMapper *chunks.ChunkDiskMapper
 	chunkRange      int64
 	samplesPerChunk int
+
+	ErrorBound float64
 }
 
 // append adds the sample (t, v) to the series. The caller also has to provide
@@ -1519,7 +1523,7 @@ type chunkOpts struct {
 // isolation for this append.)
 // Series lock must be held when calling.
 func (s *memSeries) append(t int64, v float64, appendID uint64, o chunkOpts) (sampleInOrder, chunkCreated bool) {
-	c, sampleInOrder, chunkCreated := s.appendPreprocessor(t, chunkenc.EncXOR, o)
+	c, sampleInOrder, chunkCreated := s.appendPreprocessor(t, chunkenc.EncCL, o)
 	if !sampleInOrder {
 		return sampleInOrder, chunkCreated
 	}
@@ -1670,7 +1674,7 @@ func (s *memSeries) appendPreprocessor(t int64, e chunkenc.Encoding, o chunkOpts
 			return c, false, false
 		}
 		// There is no head chunk in this series yet, create the first chunk for the sample.
-		c = s.cutNewHeadChunk(t, e, o.chunkRange)
+		c = s.cutNewHeadChunk(t, e, o.chunkRange, o.ErrorBound)
 		chunkCreated = true
 	}
 
@@ -1680,19 +1684,27 @@ func (s *memSeries) appendPreprocessor(t int64, e chunkenc.Encoding, o chunkOpts
 	}
 
 	// Check the chunk size, unless we just created it and if the chunk is too large, cut a new one.
-	if !chunkCreated && len(c.chunk.Bytes()) > maxBytesPerXORChunk {
-		c = s.cutNewHeadChunk(t, e, o.chunkRange)
+	chunkSize := len(c.chunk.Bytes())
+	_, ok := s.app.(*chunkenc.CLAppender)
+	if ok {
+		chunkSize = s.app.(*chunkenc.CLAppender).EstimatedSize()
+	}
+	if !chunkCreated && chunkSize > maxBytesPerXORChunk {
+		c = s.cutNewHeadChunk(t, e, o.chunkRange, o.ErrorBound)
 		chunkCreated = true
 	}
 
 	if c.chunk.Encoding() != e {
 		// The chunk encoding expected by this append is different than the head chunk's
 		// encoding. So we cut a new chunk with the expected encoding.
-		c = s.cutNewHeadChunk(t, e, o.chunkRange)
+		c = s.cutNewHeadChunk(t, e, o.chunkRange, o.ErrorBound)
 		chunkCreated = true
 	}
 
 	numSamples := c.chunk.NumSamples()
+	if ok {
+		numSamples = s.app.(*chunkenc.CLAppender).NumSamples()
+	}
 	if numSamples == 0 {
 		// It could be the new chunk created after reading the chunk snapshot,
 		// hence we fix the minTime of the chunk here.
@@ -1713,7 +1725,7 @@ func (s *memSeries) appendPreprocessor(t int64, e chunkenc.Encoding, o chunkOpts
 	// as we expect more chunks to come.
 	// Note that next chunk will have its nextAt recalculated for the new rate.
 	if t >= s.nextAt || numSamples >= o.samplesPerChunk*2 {
-		c = s.cutNewHeadChunk(t, e, o.chunkRange)
+		c = s.cutNewHeadChunk(t, e, o.chunkRange, o.ErrorBound)
 		chunkCreated = true
 	}
 
@@ -1733,7 +1745,7 @@ func (s *memSeries) histogramsAppendPreprocessor(t int64, e chunkenc.Encoding, o
 			return c, false, false
 		}
 		// There is no head chunk in this series yet, create the first chunk for the sample.
-		c = s.cutNewHeadChunk(t, e, o.chunkRange)
+		c = s.cutNewHeadChunk(t, e, o.chunkRange, o.ErrorBound)
 		chunkCreated = true
 	}
 
@@ -1745,7 +1757,7 @@ func (s *memSeries) histogramsAppendPreprocessor(t int64, e chunkenc.Encoding, o
 	if c.chunk.Encoding() != e {
 		// The chunk encoding expected by this append is different than the head chunk's
 		// encoding. So we cut a new chunk with the expected encoding.
-		c = s.cutNewHeadChunk(t, e, o.chunkRange)
+		c = s.cutNewHeadChunk(t, e, o.chunkRange, o.ErrorBound)
 		chunkCreated = true
 	}
 
@@ -1786,7 +1798,7 @@ func (s *memSeries) histogramsAppendPreprocessor(t int64, e chunkenc.Encoding, o
 	// increased or if the bucket/span count has increased.
 	// Note that next chunk will have its nextAt recalculated for the new rate.
 	if (t >= s.nextAt || numBytes >= targetBytes*2) && (numSamples >= chunkenc.MinSamplesPerHistogramChunk || t >= nextChunkRangeStart) {
-		c = s.cutNewHeadChunk(t, e, o.chunkRange)
+		c = s.cutNewHeadChunk(t, e, o.chunkRange, o.ErrorBound)
 		chunkCreated = true
 	}
 
@@ -1811,7 +1823,7 @@ func computeChunkEndTime(start, cur, maxT int64, ratioToFull float64) int64 {
 	return int64(float64(start) + float64(maxT-start)/math.Floor(n))
 }
 
-func (s *memSeries) cutNewHeadChunk(mint int64, e chunkenc.Encoding, chunkRange int64) *memChunk {
+func (s *memSeries) cutNewHeadChunk(mint int64, e chunkenc.Encoding, chunkRange int64, errbound float64) *memChunk {
 	// When cutting a new head chunk we create a new memChunk instance with .prev
 	// pointing at the current .headChunks, so it forms a linked list.
 	// All but first headChunks list elements will be m-mapped as soon as possible
@@ -1829,28 +1841,37 @@ func (s *memSeries) cutNewHeadChunk(mint int64, e chunkenc.Encoding, chunkRange 
 			panic(err) // This should never happen.
 		}
 	} else {
-		s.headChunks.chunk = chunkenc.NewXORChunk()
+		s.headChunks.chunk = chunkenc.NewCLChunk()
 	}
 
 	// Set upper bound on when the next chunk must be started. An earlier timestamp
 	// may be chosen dynamically at a later point.
 	s.nextAt = rangeForTimestamp(mint, chunkRange)
 
+	if s.app != nil {
+		clapp, ok := s.app.(*chunkenc.CLAppender)
+		if ok {
+			clapp.Compact()
+		}
+	}
+
 	app, err := s.headChunks.chunk.Appender()
 	if err != nil {
 		panic(err)
 	}
 	s.app = app
+	app.(*chunkenc.CLAppender).SetCompressType(chunkenc.QSimple8b)
+
 	return s.headChunks
 }
 
 // cutNewOOOHeadChunk cuts a new OOO chunk and m-maps the old chunk.
 // The caller must ensure that s is locked and s.ooo is not nil.
-func (s *memSeries) cutNewOOOHeadChunk(mint int64, chunkDiskMapper *chunks.ChunkDiskMapper, logger *slog.Logger) (*oooHeadChunk, []chunks.ChunkDiskMapperRef) {
+func (s *memSeries) cutNewOOOHeadChunk(mint int64, chunkDiskMapper *chunks.ChunkDiskMapper, logger *slog.Logger, errbound float64) (*oooHeadChunk, []chunks.ChunkDiskMapperRef) {
 	ref := s.mmapCurrentOOOHeadChunk(chunkDiskMapper, logger)
 
 	s.ooo.oooHeadChunk = &oooHeadChunk{
-		chunk:   NewOOOChunk(),
+		chunk:   NewOOOChunkWithErrorBound(errbound),
 		minTime: mint,
 		maxTime: math.MinInt64,
 	}

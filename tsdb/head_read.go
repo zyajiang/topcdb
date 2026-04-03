@@ -414,6 +414,7 @@ func (h *Head) chunkFromSeries(s *memSeries, cid chunks.HeadChunkID, isOOO bool,
 	if headChunk && isOpen && copyLastChunk {
 		// The caller may ask to copy the head chunk in order to take the
 		// bytes of the chunk without causing the race between read and append.
+		s.app.(*chunkenc.CLAppender).Compact()
 		b := s.headChunks.chunk.Bytes()
 		newB := make([]byte, len(b))
 		copy(newB, b) // TODO(codesome): Use bytes.Clone() when we upgrade to Go 1.20.

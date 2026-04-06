@@ -99,11 +99,17 @@ make build
 
 If you use this repository in your research, please cite:
 ```bibtex
-@misc{jiang2025topcdb,
-  title  = {TopcDB: Two-Phase Compactable Lossy Compression for Timeseries Databases},
-  author = {Zijian Jiang and Peiquan Jin},
-  year   = {2025}
+@inproceedings{topcdb,
+    author={Jiang, Zijian and Jin, Peiquan},
+    booktitle={2025 IEEE International Symposium on Parallel and Distributed Processing with Applications (ISPA)}, 
+    title={TopcDB: Two-Phase Compactable Lossy Compression for Timeseries Databases}, 
+    year={2025},
+    volume={},
+    number={},
+    pages={739-746},
+    doi={10.1109/ISPA67752.2025.00100}
 }
+
 ```
 
 ## Acknowledgement

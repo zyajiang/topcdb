@@ -1,203 +1,111 @@
-<h1 align="center" style="border-bottom: none">
-    <a href="https://prometheus.io" target="_blank"><img alt="Prometheus" src="/documentation/images/prometheus-logo.svg"></a><br>Prometheus
-</h1>
+# TopcDB
 
-<p align="center">Visit <a href="https://prometheus.io" target="_blank">prometheus.io</a> for the full documentation,
-examples and guides.</p>
+TopcDB is a two-phase compactable lossy compression framework for LSM-tree-based time-series databases.
 
-<div align="center">
+This repository contains our implementation of **TopcDB on top of Prometheus**, focusing on error-bounded compression for time-series workloads with compaction and out-of-order data.
 
-[![CI](https://github.com/prometheus/prometheus/actions/workflows/ci.yml/badge.svg)](https://github.com/prometheus/prometheus/actions/workflows/ci.yml)
-[![Docker Repository on Quay](https://quay.io/repository/prometheus/prometheus/status)][quay]
-[![Docker Pulls](https://img.shields.io/docker/pulls/prom/prometheus.svg?maxAge=604800)][hub]
-[![Go Report Card](https://goreportcard.com/badge/github.com/prometheus/prometheus)](https://goreportcard.com/report/github.com/prometheus/prometheus)
-[![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/486/badge)](https://bestpractices.coreinfrastructure.org/projects/486)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/prometheus/prometheus/badge)](https://securityscorecards.dev/viewer/?uri=github.com/prometheus/prometheus)
-[![CLOMonitor](https://img.shields.io/endpoint?url=https://clomonitor.io/api/projects/cncf/prometheus/badge)](https://clomonitor.io/projects/cncf/prometheus)
-[![Gitpod ready-to-code](https://img.shields.io/badge/Gitpod-ready--to--code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/prometheus/prometheus)
-[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/prometheus.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:prometheus)
+## Overview
 
-</div>
+Lossy compression is attractive for time-series databases because it can significantly reduce storage cost while preserving trend information under a bounded error. However, existing lossy compressors are not well aligned with the storage behavior of LSM-tree-based TSDBs.
 
-Prometheus, a [Cloud Native Computing Foundation](https://cncf.io/) project, is a systems and service monitoring system. It collects metrics
-from configured targets at given intervals, evaluates rule expressions,
-displays the results, and can trigger alerts when specified conditions are observed.
+TopcDB is designed to address two practical issues:
 
-The features that distinguish Prometheus from other metrics and monitoring systems are:
+1. **Error accumulation during compaction**  
+   Traditional lossy compression may introduce additional error every time compressed chunks are decompressed, merged, and recompressed during compaction.
 
-* A **multi-dimensional** data model (time series defined by metric name and set of key/value dimensions)
-* PromQL, a **powerful and flexible query language** to leverage this dimensionality
-* No dependency on distributed storage; **single server nodes are autonomous**
-* An HTTP **pull model** for time series collection
-* **Pushing time series** is supported via an intermediary gateway for batch jobs
-* Targets are discovered via **service discovery** or **static configuration**
-* Multiple modes of **graphing and dashboarding support**
-* Support for hierarchical and horizontal **federation**
+2. **Poor compression on small chunks**  
+   Time-series databases usually compress small in-memory chunks, where many state-of-the-art lossy compressors become less effective.
 
-## Architecture overview
+TopcDB introduces a **two-phase compression architecture** to solve both problems while remaining compatible with the compaction workflow of Prometheus-style storage engines.
 
-![Architecture overview](documentation/images/architecture.svg)
+## Key Ideas
 
-## Install
+### Phase 1: Compression for in-memory and lower-level chunks
+Phase 1 is designed for small chunks and hot data. It combines:
 
-There are various ways of installing Prometheus.
+- **Linear-scale quantization** for error-bounded float-to-integer conversion
+- A **merge-friendly Lorenzo predictor**
+- **Simple8b** bit packing for efficient encoding of small integer residuals
 
-### Precompiled binaries
+This phase provides strong compression even when chunk sizes are small.
 
-Precompiled binaries for released versions are available in the
-[*download* section](https://prometheus.io/download/)
-on [prometheus.io](https://prometheus.io). Using the latest production release binary
-is the recommended way of installing Prometheus.
-See the [Installing](https://prometheus.io/docs/introduction/install/)
-chapter in the documentation for all the details.
+### Phase 2: Compression for compaction and persistent storage
+Phase 2 is used when chunks are compacted and merged into larger blocks. It performs:
 
-### Docker images
+- Decoding of quantized values
+- Chronological merging
+- Re-encoding with **entropy coding**
+- Level-aware chunk resizing for better compression at higher storage levels
 
-Docker images are available on [Quay.io](https://quay.io/repository/prometheus/prometheus) or [Docker Hub](https://hub.docker.com/r/prom/prometheus/).
+This design avoids repeated lossy re-quantization during compaction and improves compression efficiency for cold data.
 
-You can launch a Prometheus container for trying it out with
+### Adaptive chunk sizing
+TopcDB increases chunk sizes across storage levels to match tiered compaction behavior. This improves compression density while keeping the design compatible with the underlying LSM-tree workflow.
 
-```bash
-docker run --name prometheus -d -p 127.0.0.1:9090:9090 prom/prometheus
-```
+## Highlights
 
-Prometheus will now be reachable at <http://localhost:9090/>.
+According to the paper, TopcDB achieves:
 
-### Building from source
+- **4.1×–8.3× higher compression ratio than Prometheus**
+- **147% higher write throughput than Prometheus**
+- **1.1×–2.8× higher compression ratio** than state-of-the-art lossy compressors on in-order data
+- **1.1×–1.4× higher compression ratio** than state-of-the-art lossy compressors on out-of-order data
+- **8%–13% higher compression ratio** than standalone QSimple8b through adaptive chunk sizing and selective encoding
 
-To build Prometheus from source code, You need:
+## Repository Structure
 
-* Go [version 1.17 or greater](https://golang.org/doc/install).
-* NodeJS [version 16 or greater](https://nodejs.org/).
-* npm [version 7 or greater](https://www.npmjs.com/).
+This repository is based on the Prometheus codebase. The main directories include:
 
-Start by cloning the repository:
+- `cmd/` – executable entry points
+- `tsdb/` – TSDB-related implementation
+- `storage/` – storage layer components
+- `web/` – web/UI components
+- `documentation/` and `docs/` – documentation assets
 
-```bash
-git clone https://github.com/prometheus/prometheus.git
-cd prometheus
-```
+If you are exploring the TopcDB implementation, start from the TSDB and storage-related components.
 
-You can use the `go` tool to build and install the `prometheus`
-and `promtool` binaries into your `GOPATH`:
+## Getting Started
+
+### Prerequisites
+
+To build from source, make sure you have:
+
+- Go
+- Node.js
+- npm
+- Make
+
+### Clone the repository
 
 ```bash
-GO111MODULE=on go install github.com/prometheus/prometheus/cmd/...
-prometheus --config.file=your_config.yml
+git clone https://github.com/zyajiang/topcdb.git
+cd topcdb
+git checkout topcdb-dev
 ```
 
-*However*, when using `go install` to build Prometheus, Prometheus will expect to be able to
-read its web assets from local filesystem directories under `web/ui/static` and
-`web/ui/templates`. In order for these assets to be found, you will have to run Prometheus
-from the root of the cloned repository. Note also that these directories do not include the
-React UI unless it has been built explicitly using `make assets` or `make build`.
-
-An example of the above configuration file can be found [here.](https://github.com/prometheus/prometheus/blob/main/documentation/examples/prometheus.yml)
-
-You can also build using `make build`, which will compile in the web assets so that
-Prometheus can be run from anywhere:
+## Build
 
 ```bash
 make build
+```
+
+## Run
+
+```bash
 ./prometheus --config.file=your_config.yml
 ```
 
-The Makefile provides several targets:
+## Citation
 
-* *build*: build the `prometheus` and `promtool` binaries (includes building and compiling in web assets)
-* *test*: run the tests
-* *test-short*: run the short tests
-* *format*: format the source code
-* *vet*: check the source code for common errors
-* *assets*: build the React UI
-
-### Service discovery plugins
-
-Prometheus is bundled with many service discovery plugins.
-When building Prometheus from source, you can edit the [plugins.yml](./plugins.yml)
-file to disable some service discoveries. The file is a yaml-formatted list of go
-import path that will be built into the Prometheus binary.
-
-After you have changed the file, you
-need to run `make build` again.
-
-If you are using another method to compile Prometheus, `make plugins` will
-generate the plugins file accordingly.
-
-If you add out-of-tree plugins, which we do not endorse at the moment,
-additional steps might be needed to adjust the `go.mod` and `go.sum` files. As
-always, be extra careful when loading third party code.
-
-### Building the Docker image
-
-The `make docker` target is designed for use in our CI system.
-You can build a docker image locally with the following commands:
-
-```bash
-make promu
-promu crossbuild -p linux/amd64
-make npm_licenses
-make common-docker-amd64
+If you use this repository in your research, please cite:
+```bibtex
+@misc{jiang2025topcdb,
+  title  = {TopcDB: Two-Phase Compactable Lossy Compression for Timeseries Databases},
+  author = {Zijian Jiang and Peiquan Jin},
+  year   = {2025}
+}
 ```
 
-## Using Prometheus as a Go Library
+## Acknowledgement
 
-### Remote Write
-
-We are publishing our Remote Write protobuf independently at
-[buf.build](https://buf.build/prometheus/prometheus/assets).
-
-You can use that as a library:
-
-```shell
-go get buf.build/gen/go/prometheus/prometheus/protocolbuffers/go@latest
-```
-
-This is experimental.
-
-### Prometheus code base
-
-In order to comply with [go mod](https://go.dev/ref/mod#versions) rules,
-Prometheus release number do not exactly match Go module releases.
-
-For the
-Prometheus v3.y.z releases, we are publishing equivalent v0.3y.z tags. The y in v0.3y.z is always padded to two digits, with a leading zero if needed.
-
-Therefore, a user that would want to use Prometheus v3.0.0 as a library could do:
-
-```shell
-go get github.com/prometheus/prometheus@v0.300.0
-```
-
-For the
-Prometheus v2.y.z releases, we published the equivalent v0.y.z tags.
-
-Therefore, a user that would want to use Prometheus v2.35.0 as a library could do:
-
-```shell
-go get github.com/prometheus/prometheus@v0.35.0
-```
-
-This solution makes it clear that we might break our internal Go APIs between
-minor user-facing releases, as [breaking changes are allowed in major version
-zero](https://semver.org/#spec-item-4).
-
-## React UI Development
-
-For more information on building, running, and developing on the React-based UI, see the React app's [README.md](web/ui/README.md).
-
-## More information
-
-* Godoc documentation is available via [pkg.go.dev](https://pkg.go.dev/github.com/prometheus/prometheus). Due to peculiarities of Go Modules, v3.y.z will be displayed as v0.3y.z (the y in v0.3y.z is always padded to two digits, with a leading zero if needed), while v2.y.z will be displayed as v0.y.z.
-* See the [Community page](https://prometheus.io/community) for how to reach the Prometheus developers and users on various communication channels.
-
-## Contributing
-
-Refer to [CONTRIBUTING.md](https://github.com/prometheus/prometheus/blob/main/CONTRIBUTING.md)
-
-## License
-
-Apache License 2.0, see [LICENSE](https://github.com/prometheus/prometheus/blob/main/LICENSE).
-
-[hub]: https://hub.docker.com/r/prom/prometheus/
-[quay]: https://quay.io/repository/prometheus/prometheus
+This project is implemented on top of the Prometheus codebase. We thank the Prometheus community and maintainers for providing the foundation that made this work possible.

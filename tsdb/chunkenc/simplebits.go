@@ -147,14 +147,12 @@ func BitSelectors(bitCounters []BitCounter, maxSegmentsNum int, maxBits int, tot
 		if len(dp[segNum][maxBits].bounds) == 0 {
 			continue
 		}
-		currProportion := float64(0)
 		currCost := dp[segNum][maxBits].cost
 		metaCost := BitWidth(uint64(segNum - 1))
 		for i := 0; i < segNum; i++ {
 			N := float64(1)
 			if i < segNum-1 {
-				currProportion += dp[segNum][maxBits].proportions[i]
-				N = min(max(1/(1-currProportion)-1, 1), float64(Simplebits_MaxN))
+				N = min(max(1/(1-dp[segNum][maxBits].proportions[i])-1, 1), float64(Simplebits_MaxN))
 			}
 			currCost += dp[segNum][maxBits].proportions[i] * float64(metaCost) / N
 		}
@@ -169,12 +167,10 @@ func BitSelectors(bitCounters []BitCounter, maxSegmentsNum int, maxBits int, tot
 	}
 
 	bitSelectors := make([]BitSelector, 0)
-	currProprtion := float64(0)
 	for i := 0; i < targetSegmentsNum; i++ {
 		N := float64(1)
 		if i < targetSegmentsNum-1 {
-			currProprtion += dp[targetSegmentsNum][maxBits].proportions[i]
-			N = min(max(1/(1-currProprtion)-1, 1), float64(Simplebits_MaxN))
+			N = min(max(1/(1-dp[targetSegmentsNum][maxBits].proportions[i])-1, 1), float64(Simplebits_MaxN))
 		}
 		bitSelectors = append(bitSelectors, BitSelector{
 			Bits:     dp[targetSegmentsNum][maxBits].bounds[i],

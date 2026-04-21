@@ -410,11 +410,14 @@ func (h *Head) chunkFromSeries(s *memSeries, cid chunks.HeadChunkID, isOOO bool,
 		return nil, 0, storage.ErrNotFound
 	}
 
+	if headChunk && isOpen {
+		s.app.(*chunkenc.CLAppender).Compact()
+	}
+
 	chk, maxTime := c.chunk, c.maxTime
 	if headChunk && isOpen && copyLastChunk {
 		// The caller may ask to copy the head chunk in order to take the
 		// bytes of the chunk without causing the race between read and append.
-		s.app.(*chunkenc.CLAppender).Compact()
 		b := s.headChunks.chunk.Bytes()
 		newB := make([]byte, len(b))
 		copy(newB, b) // TODO(codesome): Use bytes.Clone() when we upgrade to Go 1.20.
@@ -480,6 +483,11 @@ func (s *memSeries) chunk(id chunks.HeadChunkID, chunkDiskMapper *chunks.ChunkDi
 	ix -= len(s.mmappedChunks)
 
 	offset := headChunksLen - ix - 1
+
+	if s.app != nil {
+		s.app.(*chunkenc.CLAppender).Compact()
+	}
+
 	// headChunks is a linked list where first element is the most recent one and the last one is the oldest.
 	// This order is reversed when compared with mmappedChunks, since mmappedChunks[0] is the oldest chunk,
 	// while headChunk.atOffset(0) would give us the most recent chunk.
@@ -530,6 +538,10 @@ func (s *memSeries) iterator(id chunks.HeadChunkID, c chunkenc.Chunk, isoState *
 
 	numSamples := c.NumSamples()
 	stopAfter := numSamples
+
+	if s.app != nil {
+		s.app.(*chunkenc.CLAppender).Compact()
+	}
 
 	if isoState != nil && !isoState.IsolationDisabled() {
 		totalSamples := 0    // Total samples in this series.

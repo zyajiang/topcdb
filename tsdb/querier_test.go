@@ -2092,7 +2092,7 @@ func (cr mockChunkReader) Close() error {
 }
 
 func TestDeletedIterator(t *testing.T) {
-	chk := chunkenc.NewXORChunk()
+	chk := chunkenc.NewCLChunk()
 	app, err := chk.Appender()
 	require.NoError(t, err)
 	// Insert random stuff from (0, 1000).
@@ -2102,6 +2102,7 @@ func TestDeletedIterator(t *testing.T) {
 		act[i].f = rand.Float64()
 		app.Append(act[i].t, act[i].f)
 	}
+	app.(*chunkenc.CLAppender).Compact()
 
 	cases := []struct {
 		r tombstones.Intervals

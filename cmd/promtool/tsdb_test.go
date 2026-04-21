@@ -20,6 +20,7 @@ import (
 	"io"
 	"math"
 	"math/bits"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,9 +40,7 @@ import (
 )
 
 func BenchmarkAlgorithmCompression(b *testing.B) {
-	tb := &compressBenchmark{
-		logger: promslog.New(&promslog.Config{}),
-	}
+	dl := tsdb.NewDatasetLoader()
 
 	// ErrorBound is absolute error bound for compression algorithms.
 	ErrorBound := 1e-4
@@ -49,10 +48,10 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 	ChunkSize := 1000
 	Datasets := map[string]string{
 		// "pamapv2": "/home/jzj/Datasets/PAMAP2_Dataset",
-		// "pamapv2": "/home/jzj/Datasets/PAMAP2_Dataset_mini",
+		"pamapv2": "/home/jzj/Datasets/PAMAP2_Dataset_mini",
 		// "uci_gas":           "/home/jzj/Datasets/UCI_GAS",
 		// "ucr":               "/home/jzj/Datasets/UCRAchive_2018",
-		"ett": "/home/jzj/Datasets/ETT",
+		// "ett": "/home/jzj/Datasets/ETT",
 		// "household_voltage": "/home/jzj/Datasets/Household_Voltage",
 		// "wisdm":       "/home/jzj/Datasets/WISDM_Dataset/raw",
 		// "geolife":     "/home/jzj/Datasets/Geolife_Trajectories_1_3/Data/",
@@ -73,8 +72,7 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 		fmt.Printf("Dataset: %s\n", name)
 		// ErrorBound = LosslessErrbound[name]
 
-		tb.samples = make([][]tvpair, 0, 8)
-		if err := tb.ReadDataset(name, path); err != nil {
+		if err := dl.ReadDataset(name, path); err != nil {
 			return
 		}
 
@@ -83,7 +81,7 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 		var sz_total_bytes, most_total_bytes, machete_total_bytes, gorilla_total_bytes int
 		var simple8b_total_bytes, simplebits_total_bytes, bitpacking_total_bytes, varint_total_bytes, pfor_total_bytes, huffman_total_bytes, auto_total_bytes int
 
-		for _, vals := range tb.samples {
+		for _, vals := range dl.Samples {
 			currChunkSize := min(ChunkSize, len(vals))
 
 			for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
@@ -136,15 +134,15 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 				simple8b_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
 
 				for i := batch * currChunkSize; i < (batch+1)*currChunkSize && i < len(vals); i += 1 {
-					uncompressed_data = append(uncompressed_data, vals[i].v)
-					gorilla_app.Append(int64(i), vals[i].v)
-					simple8b_app.Append(int64(i), vals[i].v)
-					simplebits_app.Append(int64(i), vals[i].v)
-					bitpacking_app.Append(int64(i), vals[i].v)
-					varint_app.Append(int64(i), vals[i].v)
-					pfor_app.Append(int64(i), vals[i].v)
-					huffman_app.Append(int64(i), vals[i].v)
-					auto_app.Append(int64(i), vals[i].v)
+					uncompressed_data = append(uncompressed_data, vals[i].V)
+					gorilla_app.Append(int64(i), vals[i].V)
+					simple8b_app.Append(int64(i), vals[i].V)
+					simplebits_app.Append(int64(i), vals[i].V)
+					bitpacking_app.Append(int64(i), vals[i].V)
+					varint_app.Append(int64(i), vals[i].V)
+					pfor_app.Append(int64(i), vals[i].V)
+					huffman_app.Append(int64(i), vals[i].V)
+					auto_app.Append(int64(i), vals[i].V)
 				}
 
 				simple8b_app.(*chunkenc.CLAppender).Compact()
@@ -213,9 +211,7 @@ func BenchmarkAlgorithmCompression(b *testing.B) {
 }
 
 func BenchmarkIntegerCompression(b *testing.B) {
-	tb := &compressBenchmark{
-		logger: promslog.New(&promslog.Config{}),
-	}
+	dl := tsdb.NewDatasetLoader()
 
 	// ErrorBound is absolute error bound for compression algorithms.
 	ErrorBounds := []float64{1e-2, 1e-3, 1e-4, 1e-5, 1e-6}
@@ -241,9 +237,7 @@ func BenchmarkIntegerCompression(b *testing.B) {
 
 		for name, path := range Datasets {
 			fmt.Printf("Dataset: %s\n", name)
-
-			tb.samples = make([][]tvpair, 0, 8)
-			if err := tb.ReadDataset(name, path); err != nil {
+			if err := dl.ReadDataset(name, path); err != nil {
 				return
 			}
 
@@ -252,16 +246,16 @@ func BenchmarkIntegerCompression(b *testing.B) {
 			var simple8b_total_time, simplebits_total_time, bitpacking_total_time, varint_total_time, pfor_total_time, gorilla_total_time, huffman_total_time time.Duration
 			// var simple8b_meta_total_bytes, simplebits_meta_total_bytes, bitpacking_meta_total_bytes, varint_meta_total_bytes, pfor_meta_total_bytes int
 
-			for _, vals := range tb.samples {
+			for _, vals := range dl.Samples {
 				data_delta := make([]int64, 0, len(vals))
 				data_zigzag := make([]uint64, 0, len(vals))
 				curr_val := int64(0)
 				for i := 0; i < len(vals); i += 1 {
 					var f2i int64
-					if vals[i].v >= 0 {
-						f2i = int64(vals[i].v/(2*ErrorBound) + 0.5)
+					if vals[i].V >= 0 {
+						f2i = int64(vals[i].V/(2*ErrorBound) + 0.5)
 					} else {
-						f2i = int64(vals[i].v/(2*ErrorBound) - 0.5)
+						f2i = int64(vals[i].V/(2*ErrorBound) - 0.5)
 					}
 					fdelta := f2i - curr_val
 					curr_val = f2i
@@ -304,22 +298,22 @@ func BenchmarkIntegerCompression(b *testing.B) {
 
 				// Huffman
 				// huffman_chks := make([]*chunkenc.CLChunk, 0, (len(vals)+currChunkSize-1)/currChunkSize)
-				start = time.Now()
-				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
-					huffman_chk := chunkenc.NewCLChunk()
-					huffman_app, _ := huffman_chk.Appender()
-					huffman_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
-					huffman_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.Huffman)
-					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
-					for j := begin; j < end; j += 1 {
-						huffman_app.Append(int64(j), vals[j].v)
-					}
-					huffman_app.(*chunkenc.CLAppender).Compact()
-					huffman_total_bytes += huffman_app.(*chunkenc.CLAppender).FloatSize()
+				// start = time.Now()
+				// for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+				// 	huffman_chk := chunkenc.NewCLChunk()
+				// 	huffman_app, _ := huffman_chk.Appender()
+				// 	huffman_app.(*chunkenc.CLAppender).SetErrorBound(ErrorBound)
+				// 	huffman_app.(*chunkenc.CLAppender).SetCompressType(chunkenc.Huffman)
+				// 	begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+				// 	for j := begin; j < end; j += 1 {
+				// 		huffman_app.Append(int64(j), vals[j].v)
+				// 	}
+				// 	huffman_app.(*chunkenc.CLAppender).Compact()
+				// 	huffman_total_bytes += huffman_app.(*chunkenc.CLAppender).FloatSize()
 
-					// huffman_chks = append(huffman_chks, huffman_chk)
-				}
-				huffman_total_time += time.Since(start)
+				// 	// huffman_chks = append(huffman_chks, huffman_chk)
+				// }
+				// huffman_total_time += time.Since(start)
 
 				// start = time.Now()
 				// for _, chk := range huffman_chks {
@@ -332,19 +326,19 @@ func BenchmarkIntegerCompression(b *testing.B) {
 
 				// Gorilla
 				// gorilla_chks := make([]*chunkenc.XORChunk, 0, (len(vals)+currChunkSize-1)/currChunkSize)
-				start = time.Now()
-				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
-					gorilla_chk := chunkenc.NewXORChunk()
-					gorilla_app, _ := gorilla_chk.Appender()
-					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
-					for j := begin; j < end; j += 1 {
-						gorilla_app.Append(int64(j), vals[j].v)
-					}
-					gorilla_total_bytes += len(gorilla_chk.Bytes()) - (end-begin)/8 - 8
+				// start = time.Now()
+				// for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+				// 	gorilla_chk := chunkenc.NewXORChunk()
+				// 	gorilla_app, _ := gorilla_chk.Appender()
+				// 	begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+				// 	for j := begin; j < end; j += 1 {
+				// 		gorilla_app.Append(int64(j), vals[j].v)
+				// 	}
+				// 	gorilla_total_bytes += len(gorilla_chk.Bytes()) - (end-begin)/8 - 8
 
-					// gorilla_chks = append(gorilla_chks, gorilla_chk)
-				}
-				gorilla_total_time += time.Since(start)
+				// 	// gorilla_chks = append(gorilla_chks, gorilla_chk)
+				// }
+				// gorilla_total_time += time.Since(start)
 
 				// start = time.Now()
 				// for _, chk := range gorilla_chks {
@@ -357,16 +351,16 @@ func BenchmarkIntegerCompression(b *testing.B) {
 
 				// BitPacking
 				// bitpacking_chks := make([][]byte, 0, (len(vals)+currChunkSize-1)/currChunkSize)
-				start = time.Now()
-				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
-					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
-					bitpacking_chk := chunkenc.BitPackingAll(data_zigzag[begin:end])
-					bitpacking_total_bytes += bitpacking_chk.Len()
-					// bitpacking_meta_total_bytes += bitpacking_meta_bytes
+				// start = time.Now()
+				// for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+				// 	begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+				// 	bitpacking_chk := chunkenc.BitPackingAll(data_zigzag[begin:end])
+				// 	bitpacking_total_bytes += bitpacking_chk.Len()
+				// 	// bitpacking_meta_total_bytes += bitpacking_meta_bytes
 
-					// bitpacking_chks = append(bitpacking_chks, bitpacking_chk.Bytes())
-				}
-				bitpacking_total_time += time.Since(start)
+				// 	// bitpacking_chks = append(bitpacking_chks, bitpacking_chk.Bytes())
+				// }
+				// bitpacking_total_time += time.Since(start)
 
 				// start = time.Now()
 				// for _, chk := range bitpacking_chks {
@@ -377,16 +371,16 @@ func BenchmarkIntegerCompression(b *testing.B) {
 
 				// Varint
 				// varint_chks := make([][]byte, 0, (len(vals)+currChunkSize-1)/currChunkSize)
-				start = time.Now()
-				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
-					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
-					varint_chk := chunkenc.VarintPackingAll(data_zigzag[begin:end])
-					varint_total_bytes += varint_chk.Len()
-					// varint_meta_total_bytes += varint_meta_bytes
+				// start = time.Now()
+				// for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+				// 	begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+				// 	varint_chk := chunkenc.VarintPackingAll(data_zigzag[begin:end])
+				// 	varint_total_bytes += varint_chk.Len()
+				// 	// varint_meta_total_bytes += varint_meta_bytes
 
-					// varint_chks = append(varint_chks, varint_chk.Bytes())
-				}
-				varint_total_time += time.Since(start)
+				// 	// varint_chks = append(varint_chks, varint_chk.Bytes())
+				// }
+				// varint_total_time += time.Since(start)
 
 				// start = time.Now()
 				// for _, chk := range varint_chks {
@@ -397,16 +391,16 @@ func BenchmarkIntegerCompression(b *testing.B) {
 
 				// PFor
 				// pfor_chks := make([][]byte, 0, (len(vals)+currChunkSize-1)/currChunkSize)
-				start = time.Now()
-				for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
-					begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
-					pfor_chk := chunkenc.PForPackingAll(data_delta[begin:end])
-					pfor_total_bytes += pfor_chk.Len()
-					// pfor_meta_total_bytes += pfor_meta_bytes
+				// start = time.Now()
+				// for batch := 0; batch*currChunkSize < len(vals); batch += 1 {
+				// 	begin, end := batch*currChunkSize, min((batch+1)*currChunkSize, len(vals))
+				// 	pfor_chk := chunkenc.PForPackingAll(data_delta[begin:end])
+				// 	pfor_total_bytes += pfor_chk.Len()
+				// 	// pfor_meta_total_bytes += pfor_meta_bytes
 
-					// pfor_chks = append(pfor_chks, pfor_chk.Bytes())
-				}
-				pfor_total_time += time.Since(start)
+				// 	// pfor_chks = append(pfor_chks, pfor_chk.Bytes())
+				// }
+				// pfor_total_time += time.Since(start)
 
 				// start = time.Now()
 				// for _, chk := range pfor_chks {
@@ -584,9 +578,7 @@ func DatasetStatistics(src []uint64) ([]DataCounter, int) {
 }
 
 func BenchmarkDatasets(b *testing.B) {
-	tb := &compressBenchmark{
-		logger: promslog.New(&promslog.Config{}),
-	}
+	dl := tsdb.NewDatasetLoader()
 
 	// ErrorBound is absolute error bound for compression algorithms.
 	ErrorBound := 1e-4
@@ -607,28 +599,27 @@ func BenchmarkDatasets(b *testing.B) {
 	for name, path := range Datasets {
 		fmt.Printf("Dataset: %s\n", name)
 
-		tb.samples = make([][]tvpair, 0, 8)
 		switch name {
 		case "pamapv2":
-			tb.readPAMAP2File(path)
+			dl.ReadPAMAP2File(path)
 		case "ett":
-			tb.readETTFile(path)
+			dl.ReadETTFile(path)
 		case "wisdm":
-			tb.readWISDMFile(path)
+			dl.ReadWISDMFile(path)
 		case "electricity":
-			tb.readElectricityFile(path)
+			dl.ReadElectricityFile(path)
 		}
-		vals := tb.samples[Timeseries[name]]
+		vals := dl.Samples[Timeseries[name]]
 
 		// data_delta := make([]int64, 0, len(vals))
 		data_zigzag := make([]uint64, 0, len(vals))
 		curr_val := int64(0)
 		for i := 0; i < len(vals); i += 1 {
 			var f2i int64
-			if vals[i].v >= 0 {
-				f2i = int64(vals[i].v/(2*ErrorBound) + 0.5)
+			if vals[i].V >= 0 {
+				f2i = int64(vals[i].V/(2*ErrorBound) + 0.5)
 			} else {
-				f2i = int64(vals[i].v/(2*ErrorBound) - 0.5)
+				f2i = int64(vals[i].V/(2*ErrorBound) - 0.5)
 			}
 			fdelta := f2i - curr_val
 			curr_val = f2i
@@ -692,10 +683,12 @@ func BenchmarkDatasets(b *testing.B) {
 }
 
 func BenchmarkCompress(b *testing.B) {
-	tb := &compressBenchmark{
+	tb := &CompressBenchmark{
 		outPath: "/home/jzj/benchout",
 		logger:  promslog.New(&promslog.Config{}),
 	}
+	dl := tsdb.NewDatasetLoader()
+
 	if tb.outPath == "" {
 		dir, err := os.MkdirTemp("", "tsdb_bench")
 		if err != nil {
@@ -712,7 +705,7 @@ func BenchmarkCompress(b *testing.B) {
 	}
 
 	dir := filepath.Join(tb.outPath, "storage")
-	chunkenc.DefaultCtype = chunkenc.Auto
+	chunkenc.DefaultCtype = chunkenc.Huffman
 	chunkenc.DefaultErrbound = 1e-2
 
 	st, err := tsdb.Open(dir, tb.logger, nil, &tsdb.Options{
@@ -722,26 +715,23 @@ func BenchmarkCompress(b *testing.B) {
 		OutOfOrderTimeWindow: int64(7200 * timeDelta),
 		SamplesPerChunk:      1000,
 		OutOfOrderCapMax:     255,
-		WALSegmentSize:       -1,
+		WALSegmentSize:       0,
 		ErrorBound:           chunkenc.DefaultErrbound,
 	}, tsdb.NewDBStats())
 	if err != nil {
 		return
 	}
-	// st.DisableCompactions()
+	st.DisableCompactions()
 	tb.storage = st
-	tb.samples = make([][]tvpair, 0, 8)
-	tb.scrape = make([]*lb, 0, len(tb.samples))
-
-	if err := tb.ReadDataset("pamapv2", "/home/jzj/Datasets/PAMAP2_Dataset"); err != nil {
+	if err := dl.ReadDataset("pamapv2", "/home/jzj/Datasets/PAMAP2_Dataset_mini"); err != nil {
 		return
 	}
 
 	// tb.generateOOO()
 
-	valid_lines := len(tb.samples[0])
-	for i := 0; i < len(tb.samples); i += 1 {
-		valid_lines = max(valid_lines, len(tb.samples[i]))
+	valid_lines := len(dl.Samples[0])
+	for i := 0; i < len(dl.Samples); i += 1 {
+		valid_lines = max(valid_lines, len(dl.Samples[i]))
 	}
 
 	var total uint64
@@ -755,28 +745,28 @@ func BenchmarkCompress(b *testing.B) {
 
 		for line := 0; line < valid_lines; line += 1 {
 			app := tb.storage.Appender(context.TODO())
-			for lbs := 0; lbs < len(tb.samples); lbs += 1 {
-				if line >= len(tb.samples[lbs]) {
+			for lbs := 0; lbs < len(dl.Samples); lbs += 1 {
+				if line >= len(dl.Samples[lbs]) {
 					continue
 				}
 				var ref storage.SeriesRef
-				if tb.scrape[lbs].ref != nil {
-					ref = *tb.scrape[lbs].ref
+				if dl.Scrape[lbs].Ref != nil {
+					ref = *dl.Scrape[lbs].Ref
 				}
 
-				ref, err := app.Append(ref, tb.scrape[lbs].labels, tb.samples[lbs][line].t, tb.samples[lbs][line].v)
+				ref, err := app.Append(ref, dl.Scrape[lbs].Labels, dl.Samples[lbs][line].T, dl.Samples[lbs][line].V)
 				if err != nil {
 					panic(err)
 				}
 
-				if tb.scrape[lbs].ref == nil {
-					tb.scrape[lbs].ref = &ref
+				if dl.Scrape[lbs].Ref == nil {
+					dl.Scrape[lbs].Ref = &ref
 				}
 			}
 			if err := app.Commit(); err != nil {
 				return err
 			}
-			total += uint64(len(tb.samples))
+			total += uint64(len(dl.Samples))
 		}
 		if err != nil {
 			return err
@@ -795,32 +785,140 @@ func BenchmarkCompress(b *testing.B) {
 	// fmt.Println(" > total OOO chunk size:", tsdb.OOOCompressedSize_test)
 	// fmt.Println(" > total OOO chunk timestamp size:", tsdb.OOOChunksTimestamp_test)
 
-	time.Sleep(120 * time.Second)
-
-	m1, err := labels.NewMatcher(labels.MatchEqual, "FileID", "0")
-	if err != nil {
-		return
-	}
-	m2, err := labels.NewMatcher(labels.MatchEqual, "CaseID", "0")
-	if err != nil {
-		return
-	}
-
-	if err := tb.selectFile(m1, m2); err != nil {
-		return
-	}
-
 	if _, err = measureTime("stopStorage", func() error {
 		if err := tb.storage.Close(); err != nil {
 			return err
 		}
 
-		// timeAfterCompaction := time.Since(timeStart)
-		// fmt.Println(" > samples/sec (with compaction):", float64(total)/timeAfterCompaction.Seconds())
-
 		return tb.stopProfiling()
 	}); err != nil {
 		return
+	}
+
+	// time.Sleep(120 * time.Second)
+
+	tb.storage, _ = tsdb.Open(dir, tb.logger, nil, &tsdb.Options{
+		RetentionDuration:    int64(3650 * 24 * time.Hour / time.Millisecond),
+		MinBlockDuration:     int64(2 * time.Hour / time.Millisecond),
+		MaxBlockDuration:     int64(162 * time.Hour / time.Millisecond),
+		OutOfOrderTimeWindow: int64(7200 * timeDelta),
+		SamplesPerChunk:      1000,
+		OutOfOrderCapMax:     255,
+		WALSegmentSize:       0,
+		ErrorBound:           chunkenc.DefaultErrbound,
+	}, tsdb.NewDBStats())
+
+	// PAMAPv2/Protocol/subject101.dat中第11列（3D-gyroscope data (rad/s) ）为例
+	m1, err := labels.NewMatcher(labels.MatchEqual, "FileID", "0")
+	if err != nil {
+		return
+	}
+	m2, err := labels.NewMatcher(labels.MatchEqual, "CaseID", "10")
+	if err != nil {
+		return
+	}
+
+	// 确定查询数据范围
+	// Determine the query time range from the loaded dataset.
+	minTime := int64(360000 * timeDelta)
+	maxTime := int64(370000 * timeDelta)
+
+	if _, err := measureTime("selectFile", func() error {
+		if err, _ := tb.selectTestThroughput(minTime, maxTime, m1, m2); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return
+	}
+}
+
+func BenchmarkSelect(b *testing.B) {
+	tb := &CompressBenchmark{
+		outPath: "/home/jzj/benchout",
+		logger:  promslog.New(&promslog.Config{}),
+	}
+
+	dir := filepath.Join(tb.outPath, "storage")
+
+	st, err := tsdb.Open(dir, tb.logger, nil, &tsdb.Options{
+		RetentionDuration:    int64(3650 * 24 * time.Hour / time.Millisecond),
+		MinBlockDuration:     int64(2 * time.Hour / time.Millisecond),
+		MaxBlockDuration:     int64(162 * time.Hour / time.Millisecond),
+		OutOfOrderTimeWindow: int64(7200 * timeDelta),
+		SamplesPerChunk:      1000,
+		OutOfOrderCapMax:     255,
+		WALSegmentSize:       -1,
+	}, tsdb.NewDBStats())
+	if err != nil {
+		b.Fatalf("failed to open tsdb: %v", err)
+	}
+	defer st.Close()
+
+	tb.storage = st
+
+	m1, err := labels.NewMatcher(labels.MatchEqual, "FileID", "0")
+	if err != nil {
+		b.Fatalf("failed to create matcher: %v", err)
+	}
+	m2, err := labels.NewMatcher(labels.MatchEqual, "CaseID", "10")
+	if err != nil {
+		b.Fatalf("failed to create matcher: %v", err)
+	}
+
+	// Determine the query time range from the loaded dataset.
+	minTime := int64(0 * timeDelta)
+	maxTime := int64(376400 * timeDelta)
+	queryDuration := int64(time.Hour.Milliseconds())
+
+	if maxTime-minTime <= queryDuration {
+		b.Fatalf("total time range of data is smaller than query duration")
+	}
+
+	latencies := make([]time.Duration, 0, b.N)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		// Generate a random start time for the query.
+		randomStartOffset := time.Duration(rand.Intn(int(maxTime-minTime-queryDuration))) * time.Millisecond
+		tMin := minTime + randomStartOffset.Milliseconds()
+		tMax := tMin + queryDuration
+
+		start := time.Now()
+		err, _ := tb.selectTestThroughput(tMin, tMax, m1, m2)
+		latency := time.Since(start)
+
+		if err != nil {
+			// Don't fail the benchmark, but log the error.
+			b.Logf("query failed: %v", err)
+		}
+		latencies = append(latencies, latency)
+	}
+
+	b.StopTimer()
+
+	// Calculate and report statistics.
+	if len(latencies) > 0 {
+		slices.Sort(latencies)
+		p99Index := int(float64(len(latencies)) * 0.99)
+		p99 := latencies[p99Index]
+		qps := float64(len(latencies)) / b.Elapsed().Seconds()
+
+		var totalLatency time.Duration
+		for _, l := range latencies {
+			totalLatency += l
+		}
+		avgLatency := totalLatency / time.Duration(len(latencies))
+
+		fmt.Printf("\n--- Select Benchmark Results ---\n")
+		fmt.Printf("Total Queries: %d\n", len(latencies))
+		fmt.Printf("QPS: %.2f\n", qps)
+		fmt.Printf("P99 Latency: %s\n", p99)
+		fmt.Printf("Average Latency: %s\n", avgLatency)
+		fmt.Printf("Min Latency: %s\n", latencies[0])
+		fmt.Printf("Max Latency: %s\n", latencies[len(latencies)-1])
+		fmt.Printf("---------------------------------\n")
 	}
 }
 

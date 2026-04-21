@@ -639,6 +639,15 @@ func (wp *walSubsetProcessor) processWALSamples(h *Head, mmappedChunks, oooMmapp
 		default:
 		}
 	}
+
+	for _, ss := range h.series.series {
+		for _, ms := range ss {
+			if ms.app != nil {
+				ms.app.(*chunkenc.CLAppender).Compact()
+			}
+		}
+	}
+
 	h.updateMinMaxTime(mint, maxt)
 
 	return unknownRefs, unknownHistogramRefs, mmapOverlappingChunks
@@ -1066,6 +1075,11 @@ func (s *memSeries) encodeToSnapshotRecord(b []byte) []byte {
 	buf.PutBE64int64(0) // Backwards-compatibility; was chunkRange but now unused.
 
 	s.Lock()
+
+	if s.app != nil {
+		s.app.(*chunkenc.CLAppender).Compact()
+	}
+
 	if s.headChunks == nil {
 		buf.PutUvarint(0)
 	} else {

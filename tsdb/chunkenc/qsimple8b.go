@@ -24,8 +24,8 @@ const (
 	None
 )
 
-var DefaultCtype CompressType = Auto
-var DefaultErrbound float64 = 0.01
+var DefaultCtype CompressType = Huffman
+var DefaultErrbound float64 = 1e-2
 
 // SZ3 can not work on too small chunks.
 var SZ3_MinChunkSize int = 1000
@@ -53,8 +53,7 @@ func (c *CLChunk) Bytes() []byte {
 }
 
 func (c *CLChunk) NumSamples() int {
-	num, _, _, _ := readCLMeta(c.b.stream)
-	return int(num)
+	return int(binary.BigEndian.Uint16(c.Bytes()))
 }
 
 func (c *CLChunk) Compact() {
@@ -110,7 +109,7 @@ type CLAppender struct {
 	timestamps *TimestampsDoD
 
 	v   int64
-	num uint32
+	num uint16
 
 	ctype    CompressType
 	errbound float64
@@ -141,7 +140,8 @@ func (a *CLAppender) SetCompressType(ctype CompressType) {
 func (a *CLAppender) Append(t int64, v float64) {
 	// Write the timestamp.
 	a.timestamps.Append(t)
-	a.num += 1
+	a.num = binary.BigEndian.Uint16(a.b.bytes()) + 1
+	binary.BigEndian.PutUint16(a.b.bytes(), a.num)
 
 	// When compressType is Machete, MOST or SZ3, we do not need to quantize the float value.
 	if a.ctype == Machete || a.ctype == MOST || a.ctype == SZ3 {
@@ -184,6 +184,11 @@ func (a *CLAppender) Append(t int64, v float64) {
 
 // AppendQuantizer appends the quantized integer value directly, which happens when compaction.
 func (a *CLAppender) AppendQuantizer(t int64, v int64) {
+	// Write the timestamp.
+	a.timestamps.Append(t)
+	a.num = binary.BigEndian.Uint16(a.b.bytes()) + 1
+	binary.BigEndian.PutUint16(a.b.bytes(), a.num)
+
 	// Step1: Quantize the float value.
 	// Step2: Predict the current value from the previous value.
 	// Calculate the delta between the quantized value and the previous one.
@@ -208,10 +213,6 @@ func (a *CLAppender) AppendQuantizer(t int64, v int64) {
 	} else if a.ctype == Auto || a.ctype == Simplebits || a.ctype == BitPacking || a.ctype == Varint || a.ctype == Huffman {
 		a.IntDelta_buffer = append(a.IntDelta_buffer, uint64(fdelta))
 	}
-
-	// Write the timestamp.
-	a.timestamps.Append(t)
-	a.num += 1
 }
 
 func (a *CLAppender) NumSamples() int {
@@ -351,7 +352,7 @@ func (a *CLAppender) Compact() error {
 		a.b.stream = b.stream
 		a.b.count = b.count
 		writeCLMeta(a.num, uint32(ptr), a.errbound, a.ctype, a.b.stream)
-		// a.TEST_floatTotalSize = len(b.stream) - ptr
+		a.TEST_floatTotalSize = len(b.stream) - ptr
 		return nil
 	case Simplebits:
 		if a.bitCounters == nil {
@@ -369,7 +370,7 @@ func (a *CLAppender) Compact() error {
 		compressed_data = PForPackingAll(a.Integer_buffer).bytes()
 	case SZ3:
 		var outSize uint64
-		if a.num < uint32(SZ3_MinChunkSize) {
+		if a.num < uint16(SZ3_MinChunkSize) {
 			compressed_data = SZ_Compress(1, a.Float_buffer, &outSize, 0, a.errbound, 0, 0, 0, 0, 0, 0, uint64(SZ3_MinChunkSize))
 		} else {
 			compressed_data = SZ_Compress(1, a.Float_buffer, &outSize, 0, a.errbound, 0, 0, 0, 0, 0, 0, uint64(a.num))
@@ -381,7 +382,7 @@ func (a *CLAppender) Compact() error {
 	}
 
 	// a.TEST_timestampTotalSize = len(a.timestamps.b.stream)
-	// a.TEST_floatTotalSize = len(compressed_data)
+	a.TEST_floatTotalSize = len(compressed_data)
 
 	totalBytes := ptr + len(compressed_data)
 	if totalBytes > len(a.b.stream) {
@@ -413,8 +414,8 @@ type CLIterator struct {
 	// When compressType is Machete, MOST or SZ3.
 	decompressed_data []float64
 
-	numTotal uint32
-	numRead  uint32
+	numTotal uint16
+	numRead  uint16
 	ctype    CompressType
 
 	t         int64
@@ -440,7 +441,7 @@ func (it *CLIterator) Reset(b []byte) bool {
 	} else {
 		switch ctype {
 		case SZ3:
-			if num < uint32(SZ3_MinChunkSize) {
+			if num < uint16(SZ3_MinChunkSize) {
 				it.decompressed_data = SZ_Decompress(1, b[ptr:], uint64(uint32(len(b))-ptr), 0, 0, 0, 0, uint64(SZ3_MinChunkSize))
 			} else {
 				it.decompressed_data = SZ_Decompress(1, b[ptr:], uint64(uint32(len(b))-ptr), 0, 0, 0, 0, uint64(num))
@@ -641,27 +642,25 @@ func (it *CLIterator) nextTimestampDOD() error {
 	return nil
 }
 
-func readCLMeta(b []byte) (uint32, uint32, float64, CompressType) {
-	num := uint32(b[0])<<24 + uint32(b[1])<<16 + uint32(b[2])<<8 + uint32(b[3])
-	ptr := uint32(b[4])<<24 + uint32(b[5])<<16 + uint32(b[6])<<8 + uint32(b[7])
-	errbound := uint32(b[8]&0x0f)<<24 + uint32(b[9])<<16 + uint32(b[10])<<8 + uint32(b[11])
+func readCLMeta(b []byte) (uint16, uint32, float64, CompressType) {
+	num := binary.BigEndian.Uint16(b)
+	ptr := uint32(b[2])<<24 + uint32(b[3])<<16 + uint32(b[4])<<8 + uint32(b[5])
+	errbound := uint32(b[6]&0x0f)<<24 + uint32(b[7])<<16 + uint32(b[8])<<8 + uint32(b[9])
 	// CompressType indicates the type of Encoding method used.
-	ctype := (b[8] & 0xf0) >> 4
+	ctype := (b[6] & 0xf0) >> 4
 	return num, ptr, float64(0.000001) * float64(errbound), CompressType(ctype)
 }
 
-func writeCLMeta(num uint32, ptr uint32, errbound float64, ctype CompressType, b []byte) {
-	_ = b[11]
+func writeCLMeta(num uint16, ptr uint32, errbound float64, ctype CompressType, b []byte) {
+	_ = b[9] // bounds check hint to compiler
+	binary.BigEndian.PutUint16(b, num)
 	for i := 0; i < 4; i += 1 {
-		b[i] = byte(num >> (24 - 8*i))
+		b[i+2] = byte(ptr >> (24 - 8*i))
 	}
 	for i := 0; i < 4; i += 1 {
-		b[i+4] = byte(ptr >> (24 - 8*i))
+		b[i+6] = byte(uint32(errbound*1000000) >> (24 - 8*i))
 	}
-	for i := 0; i < 4; i += 1 {
-		b[i+8] = byte(uint32(errbound*1000000) >> (24 - 8*i))
-	}
-	b[8] |= byte(ctype << 4)
+	b[6] |= byte(ctype << 4)
 }
 
 type TimestampsDoD struct {
